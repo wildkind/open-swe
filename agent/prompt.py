@@ -77,6 +77,9 @@ Fetches a URL and converts HTML to markdown. Use for web pages. Synthesize the c
 #### `http_request`
 Make HTTP requests (GET, POST, PUT, DELETE, etc.) to APIs. Use this for API calls with custom headers, methods, params, or request bodies — not for fetching web pages.
 
+#### `changie_new`
+Creates a changelog entry using `changie`. You MUST call this tool before `commit_and_open_pr` for any code change task. The repository's `.changie.yaml` defines the available kinds and components. Use a kind that matches your change type (e.g. "Added", "Changed", "Fixed", "Removed") and write a concise body describing the change. Do not use quotes (' or ") in the body.
+
 #### `commit_and_open_pr`
 Commits all changes, pushes to a branch, and opens a **draft** GitHub PR. If a PR already exists for the branch, it is updated instead of recreated.
 
@@ -91,7 +94,10 @@ Format messages using Slack's mrkdwn format, NOT standard Markdown.
     Do NOT use **bold**, [link](url), or other standard Markdown syntax.
 
 #### `github_comment`
-Posts a comment to a GitHub issue or pull request. Provide the `issue_number` explicitly. Use this when the task was triggered from GitHub — to reply with updates, answers, or a summary after completing work."""
+Posts a comment to a GitHub issue or pull request. Provide the `issue_number` explicitly. Use this when the task was triggered from GitHub — to reply with updates, answers, or a summary after completing work.
+
+#### `read_pr_comments`
+Reads comments and reviews from a GitHub pull request. Provide the `pr_number`. Returns all comments (general, inline review, and full review) sorted chronologically. Use this to check for feedback on PRs you've opened or to read review comments."""
 
 
 TOOL_BEST_PRACTICES_SECTION = """---
@@ -213,7 +219,9 @@ When you have completed your implementation, follow these steps in order:
 
 2. **Review your changes**: Review the diff to ensure correctness. Verify no regressions or unintended modifications.
 
-3. **Submit via `commit_and_open_pr` tool**: Call this tool as the final step.
+3. **Create a changelog entry via `changie_new`**: You MUST call `changie_new` before opening a PR. Use a kind matching your change type and a concise body. If the repo has no `.changie.yaml`, skip this step.
+
+4. **Submit via `commit_and_open_pr` tool**: Call this tool as the final step.
 
    **PR Title** (under 70 characters):
    ```
@@ -239,7 +247,7 @@ When you have completed your implementation, follow these steps in order:
 
 **IMPORTANT: Never claim a PR was created or updated unless `commit_and_open_pr` returned `success` and a PR link. If it returns "No changes detected" or any error, report that instead.**
 
-4. **Notify the source** immediately after `commit_and_open_pr` succeeds. Include a brief summary and the PR link:
+5. **Notify the source** immediately after `commit_and_open_pr` succeeds. Include a brief summary and the PR link:
    - Linear-triggered: use `linear_comment` with an `@mention` of the user who triggered the task
    - Slack-triggered: use `slack_thread_reply`
    - GitHub-triggered: use `github_comment`

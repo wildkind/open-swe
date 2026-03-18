@@ -34,11 +34,13 @@ from .middleware import (
 )
 from .prompt import construct_system_prompt
 from .tools import (
+    changie_new,
     commit_and_open_pr,
     fetch_url,
     github_comment,
     http_request,
     linear_comment,
+    read_pr_comments,
     slack_thread_reply,
 )
 from .utils.auth import resolve_github_token
@@ -379,10 +381,12 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
         tools=[
             http_request,
             fetch_url,
+            changie_new,
             commit_and_open_pr,
             linear_comment,
             slack_thread_reply,
             github_comment,
+            read_pr_comments,
         ],
         backend=sandbox_backend,
         middleware=[
