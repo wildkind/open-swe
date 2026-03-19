@@ -20,6 +20,13 @@ from .utils.auth import (
     persist_encrypted_github_token,
     resolve_github_token_from_email,
 )
+from .utils.fibery import (
+    create_comment as fibery_create_comment,
+    fetch_document as fibery_fetch_document,
+    fetch_entity as fibery_fetch_entity,
+    fetch_entity_comments as fibery_fetch_entity_comments,
+    fetch_user_email as fibery_fetch_user_email,
+)
 from .utils.comments import get_recent_comments
 from .utils.github_app import get_github_app_installation_token
 from .utils.github_comments import (
@@ -79,6 +86,10 @@ ALLOWED_GITHUB_ORGS: frozenset[str] = frozenset(
 )
 
 LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
+
+FIBERY_API_TOKEN = os.environ.get("FIBERY_API_TOKEN", "")
+FIBERY_WORKSPACE_URL = os.environ.get("FIBERY_WORKSPACE_URL", "").rstrip("/")
+FIBERY_WEBHOOK_URL_TOKEN = os.environ.get("FIBERY_WEBHOOK_URL_TOKEN", "")
 
 _GITHUB_BOT_MESSAGE_PREFIXES = (
     "🔐 **GitHub Authentication Required**",
@@ -1465,3 +1476,413 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
 
     logger.info("Ignoring unsupported GitHub payload shape for event=%s", event_type)
     return {"status": "ignored", "reason": f"Unsupported payload for event type: {event_type}"}
+
+
+# ---------------------------------------------------------------------------
+# Fibery webhook
+# ---------------------------------------------------------------------------
+
+
+def generate_thread_id_from_fibery_entity(entity_id: str) -> str:
+    """Generate a deterministic thread ID from a Fibery entity ID.
+
+    Args:
+        entity_id: The Fibery entity UUID.
+
+    Returns:
+        A UUID-formatted thread ID derived from the entity ID.
+    """
+    hash_bytes = hashlib.sha256(f"fibery-entity:{entity_id}".encode()).hexdigest()
+    return (
+        f"{hash_bytes[:8]}-{hash_bytes[8:12]}-{hash_bytes[12:16]}-"
+        f"{hash_bytes[16:20]}-{hash_bytes[20:32]}"
+    )
+
+
+def parse_repo_field(repo_value: str) -> list[dict[str, str]]:
+    """Parse a comma-separated repo field value into repo config dicts.
+
+    Expected format: "owner/repo" or "owner/repo1, owner/repo2"
+
+    Args:
+        repo_value: Raw repo field value from Fibery entity.
+
+    Returns:
+        List of repo config dicts with 'owner' and 'name' keys.
+        Returns empty list if the field is empty or unparseable.
+    """
+    if not repo_value or not repo_value.strip():
+        return []
+
+    configs = []
+    for entry in repo_value.split(","):
+        entry = entry.strip()
+        if "/" not in entry:
+            continue
+        parts = entry.split("/", 1)
+        owner = parts[0].strip()
+        name = parts[1].strip()
+        if owner and name:
+            configs.append({"owner": owner, "name": name})
+    return configs
+
+
+async def fetch_fibery_entity_details(
+    database_type: str,
+    entity_id: str,
+    repo_field: str = "Github Repos",
+    tag_field: str = "Github Tag",
+) -> dict[str, Any] | None:
+    """Fetch full details of a Fibery entity for building the agent prompt.
+
+    Fetches the entity fields, resolves rich text descriptions via document secrets,
+    and collects all comments with their content.
+
+    Args:
+        database_type: The Fibery database type (e.g., "App/Task").
+        entity_id: The entity UUID.
+        repo_field: The field name containing target repo(s).
+        tag_field: The field name containing the Github Tag (e.g., "[TASK-1104]").
+
+    Returns:
+        Dict with keys: id, title, description, comments, repo_value, github_tag,
+        assignee_id, creator_id, url. Returns None on failure.
+    """
+    name_field = f"{database_type}/name"
+    desc_field = f"{database_type}/description"
+    repo_field_path = f"{database_type}/{repo_field}"
+    tag_field_path = f"{database_type}/{tag_field}"
+
+    fields = [
+        "fibery/id",
+        "fibery/public-id",
+        name_field,
+        desc_field,
+        repo_field_path,
+        tag_field_path,
+    ]
+
+    entity = await fibery_fetch_entity(database_type, entity_id, fields)
+    if not entity:
+        return None
+
+    # Resolve description (rich text field returns a document secret)
+    description = ""
+    desc_value = entity.get(desc_field)
+    if isinstance(desc_value, dict):
+        secret = desc_value.get("secret")
+        if secret:
+            description = await fibery_fetch_document(secret)
+    elif isinstance(desc_value, str):
+        description = desc_value
+
+    # Fetch comments
+    comments = await fibery_fetch_entity_comments(database_type, entity_id)
+
+    title = entity.get(name_field, "No title")
+    repo_value = entity.get(repo_field_path, "")
+    github_tag = entity.get(tag_field_path, "")
+    public_id = entity.get("fibery/public-id", "")
+
+    entity_url = ""
+    if FIBERY_WORKSPACE_URL and public_id:
+        entity_url = f"{FIBERY_WORKSPACE_URL}/{database_type.replace('/', '-')}/{public_id}"
+
+    return {
+        "id": entity_id,
+        "title": title,
+        "description": description or "No description",
+        "comments": comments,
+        "repo_value": repo_value if isinstance(repo_value, str) else "",
+        "github_tag": github_tag if isinstance(github_tag, str) else "",
+        "url": entity_url,
+        "database_type": database_type,
+    }
+
+
+async def process_fibery_entity(
+    entity_id: str,
+    database_type: str,
+    triggering_comment: str = "",
+    actor_user_id: str = "",
+) -> None:
+    """Process a Fibery entity by creating LangGraph thread(s) and run(s).
+
+    For multi-repo entities, spawns a separate run per repo.
+
+    Args:
+        entity_id: The Fibery entity UUID.
+        database_type: The Fibery database type.
+        triggering_comment: The comment body that triggered the run (if comment trigger).
+        actor_user_id: The Fibery user ID of the person who triggered the action.
+    """
+    logger.info("Processing Fibery entity %s (type=%s)", entity_id, database_type)
+
+    full_entity = await fetch_fibery_entity_details(database_type, entity_id)
+    if not full_entity:
+        logger.error("Failed to fetch Fibery entity details for %s", entity_id)
+        return
+
+    # Resolve user email for GitHub auth
+    user_email = None
+    if actor_user_id:
+        user_email = await fibery_fetch_user_email(actor_user_id)
+    if not user_email:
+        logger.warning("Could not resolve email for Fibery user %s", actor_user_id)
+
+    title = full_entity["title"]
+    description = full_entity["description"]
+    github_tag = full_entity["github_tag"]
+    entity_url = full_entity["url"]
+
+    # Build comments text
+    comments_text = ""
+    comments = full_entity.get("comments", [])
+    if comments:
+        comments_text = "\n\n## Comments:\n"
+        for comment in comments:
+            body = comment.get("body", "")
+            if body:
+                comments_text += f"\n{body}\n"
+
+    # Add triggering comment if not already in comments
+    if triggering_comment:
+        if not comments_text:
+            comments_text = "\n\n## Comments:\n"
+        comments_text += f"\n{triggering_comment}\n"
+
+    tag_line = f"## Fibery Tag: {github_tag}\n\n" if github_tag else ""
+    url_line = f"## Fibery Entity: {entity_url}\n\n" if entity_url else ""
+    prompt = (
+        f"Please work on the following issue:\n\n"
+        f"## Title: {title}\n\n"
+        f"{tag_line}"
+        f"{url_line}"
+        f"## Description:\n{description}\n"
+        f"{comments_text}\n\n"
+        f"Please analyze this issue and implement the necessary changes. "
+        f"When you're done, commit and push your changes."
+    )
+
+    content_blocks: list[dict[str, Any]] = [create_text_block(prompt)]
+
+    # Parse repos from entity field
+    repo_value = full_entity.get("repo_value", "")
+    repo_configs = parse_repo_field(repo_value)
+
+    if not repo_configs:
+        logger.error("No valid repos found in Fibery entity %s repo field: '%s'", entity_id, repo_value)
+        await fibery_create_comment(
+            database_type,
+            entity_id,
+            "❌ **Agent Error**\n\nNo valid repository found in the repo field. "
+            "Please set the repo field to `owner/repo` format (e.g., `langchain-ai/open-swe`).",
+        )
+        return
+
+    for repo_config in repo_configs:
+        if not _is_repo_org_allowed(repo_config):
+            logger.warning(
+                "Rejecting Fibery entity: org '%s' not in ALLOWED_GITHUB_ORGS",
+                repo_config.get("owner"),
+            )
+            continue
+
+        # Use entity+repo for thread ID in multi-repo scenarios
+        if len(repo_configs) > 1:
+            thread_id = generate_thread_id_from_fibery_entity(
+                f"{entity_id}:{repo_config['owner']}/{repo_config['name']}"
+            )
+        else:
+            thread_id = generate_thread_id_from_fibery_entity(entity_id)
+
+        configurable: dict[str, Any] = {
+            "repo": repo_config,
+            "fibery_entity": {
+                "id": entity_id,
+                "title": title,
+                "url": entity_url,
+                "github_tag": github_tag,
+                "database_type": database_type,
+            },
+            "user_email": user_email,
+            "source": "fibery",
+        }
+
+        logger.info("Checking if thread %s is active before creating run", thread_id)
+        thread_active = await is_thread_active(thread_id)
+
+        if thread_active:
+            logger.info("Thread %s is active, queuing message", thread_id)
+            queued = await queue_message_for_thread(
+                thread_id=thread_id,
+                message_content={"text": prompt},
+            )
+            if queued:
+                logger.info("Message queued for thread %s", thread_id)
+            else:
+                logger.error("Failed to queue message for thread %s", thread_id)
+        else:
+            logger.info("Creating LangGraph run for thread %s", thread_id)
+            langgraph_client = get_client(url=LANGGRAPH_URL)
+            await langgraph_client.runs.create(
+                thread_id,
+                "agent",
+                input={"messages": [{"role": "user", "content": content_blocks}]},
+                config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
+                if_not_exists="create",
+            )
+            logger.info("LangGraph run created for thread %s (repo: %s/%s)",
+                        thread_id, repo_config["owner"], repo_config["name"])
+
+
+@app.get("/webhooks/fibery")
+async def fibery_webhook_verify() -> dict[str, str]:
+    """Verify endpoint for Fibery webhook setup."""
+    return {"status": "ok", "message": "Fibery webhook endpoint is active"}
+
+
+@app.post("/webhooks/fibery")
+async def fibery_webhook(
+    request: Request, background_tasks: BackgroundTasks
+) -> dict[str, str]:
+    """Handle Fibery webhooks.
+
+    Triggers a new LangGraph run when:
+    - A comment mentioning @openswe is created on an entity
+    - An entity's workflow state changes to a configured trigger state
+
+    Authentication is via a secret URL token (Fibery does not support HMAC signing).
+    """
+    logger.info("Received Fibery webhook")
+
+    # Verify webhook token
+    token = request.query_params.get("token", "")
+    if not FIBERY_WEBHOOK_URL_TOKEN or not hmac.compare_digest(token, FIBERY_WEBHOOK_URL_TOKEN):
+        logger.warning("Invalid or missing Fibery webhook token")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        logger.exception("Failed to parse Fibery webhook JSON")
+        return {"status": "error", "message": "Invalid JSON"}
+
+    # Fibery webhooks v2 send an array of events
+    events = payload.get("events", [])
+    if not events:
+        logger.debug("No events in Fibery webhook payload")
+        return {"status": "ignored", "reason": "No events"}
+
+    for event in events:
+        entity_id = event.get("id", "")
+        database_type = event.get("type", "")
+
+        if not entity_id or not database_type:
+            logger.debug("Skipping Fibery event with missing id or type")
+            continue
+
+        # Detect the trigger type from the event
+        values = event.get("values", {})
+        values_before = event.get("valuesBefore", {})
+
+        # Check for comment trigger: look for new comment mentioning @openswe
+        # Comment events appear as entity updates — we need to fetch comments
+        # and check the latest one
+        comment_trigger = False
+        triggering_comment = ""
+        actor_user_id = ""
+
+        # Check for workflow state change trigger
+        state_changed = False
+        if values and values_before:
+            # State change events include workflow/state in values/valuesBefore
+            for key in values:
+                if "state" in key.lower() or "workflow" in key.lower():
+                    old_val = values_before.get(key)
+                    new_val = values.get(key)
+                    if old_val != new_val:
+                        state_changed = True
+                        break
+
+        # If no state change, check if this might be a comment event
+        # Fibery comment creation events still require fetching comment content
+        if not state_changed:
+            comment_trigger = True
+
+        # Get the actor (user who made the change)
+        actor = event.get("actor", {})
+        if isinstance(actor, dict):
+            actor_user_id = actor.get("id", "")
+
+        if comment_trigger:
+            # For comment triggers, we need to verify @openswe is mentioned
+            # We'll do this in the background task after fetching the comment
+            logger.info(
+                "Potential comment trigger for Fibery entity %s, scheduling verification",
+                entity_id,
+            )
+            background_tasks.add_task(
+                _process_fibery_comment_trigger,
+                entity_id,
+                database_type,
+                actor_user_id,
+            )
+        elif state_changed:
+            logger.info(
+                "State change trigger for Fibery entity %s, scheduling processing",
+                entity_id,
+            )
+            background_tasks.add_task(
+                process_fibery_entity,
+                entity_id,
+                database_type,
+                "",  # no triggering comment for state changes
+                actor_user_id,
+            )
+
+    return {"status": "accepted", "message": "Processing Fibery webhook events"}
+
+
+async def _process_fibery_comment_trigger(
+    entity_id: str,
+    database_type: str,
+    actor_user_id: str,
+) -> None:
+    """Verify a Fibery comment trigger contains @openswe and process if so.
+
+    Fibery comment webhooks don't include the comment text, so we fetch
+    the entity's comments and check the most recent one.
+    """
+    comments = await fibery_fetch_entity_comments(database_type, entity_id)
+    if not comments:
+        logger.debug("No comments found for Fibery entity %s", entity_id)
+        return
+
+    latest_comment = comments[-1]
+    comment_body = latest_comment.get("body", "")
+
+    # Bot loop prevention: skip if the comment looks like our own bot message
+    bot_prefixes = (
+        "🔐 **GitHub Authentication Required**",
+        "✅ **Pull Request Created**",
+        "✅ **Pull Request Updated**",
+        "🤖 **Agent Response**",
+        "❌ **Agent Error**",
+    )
+    for prefix in bot_prefixes:
+        if comment_body.startswith(prefix):
+            logger.debug("Ignoring Fibery comment: matches bot message prefix")
+            return
+
+    if "@openswe" not in comment_body.lower():
+        logger.debug("Ignoring Fibery comment: doesn't mention @openswe")
+        return
+
+    logger.info("Fibery comment mentions @openswe on entity %s, processing", entity_id)
+    await process_fibery_entity(
+        entity_id,
+        database_type,
+        triggering_comment=comment_body,
+        actor_user_id=actor_user_id,
+    )

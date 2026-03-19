@@ -17,6 +17,7 @@ from ..encryption import encrypt_token
 from .github_app import get_github_app_installation_token
 from .github_token import get_github_token_from_thread
 from .github_user_email_map import GITHUB_USER_EMAIL_MAP
+from .fibery import create_comment as fibery_create_comment
 from .linear import comment_on_linear_issue
 from .slack import post_slack_ephemeral_message, post_slack_thread_reply
 
@@ -55,24 +56,28 @@ def is_bot_token_only_mode() -> bool:
 def _retry_instruction(source: str) -> str:
     if source == "slack":
         return "Once authenticated, mention me again in this Slack thread to retry."
-    return "Once authenticated, reply to this issue mentioning @openswe to retry."
+    return "Once authenticated, mention @openswe again on this entity to retry."
 
 
 def _source_account_label(source: str) -> str:
     if source == "slack":
         return "Slack"
+    if source == "fibery":
+        return "Fibery"
     return "Linear"
 
 
 def _auth_link_text(source: str, auth_url: str) -> str:
     if source == "slack":
         return auth_url
-    return f"[Authenticate with GitHub]({auth_url})"
+    return f"[Authenticate with GitHub]({auth_url})"  # Markdown works for Linear and Fibery
 
 
 def _work_item_label(source: str) -> str:
     if source == "slack":
         return "thread"
+    if source == "fibery":
+        return "entity"
     return "issue"
 
 
@@ -256,6 +261,18 @@ async def leave_failure_comment(
                 thread_ts,
             )
             await post_slack_thread_reply(channel_id, thread_ts, message)
+        return
+    if source == "fibery":
+        fibery_entity = configurable.get("fibery_entity", {})
+        fe_entity_id = fibery_entity.get("id") if isinstance(fibery_entity, dict) else None
+        fe_database_type = fibery_entity.get("database_type") if isinstance(fibery_entity, dict) else None
+        if fe_entity_id and fe_database_type:
+            logger.info(
+                "Posting auth failure comment to Fibery entity %s (source=%s)",
+                fe_entity_id,
+                source,
+            )
+            await fibery_create_comment(fe_database_type, fe_entity_id, message)
         return
     if source == "github":
         logger.warning(

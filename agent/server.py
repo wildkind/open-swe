@@ -37,6 +37,8 @@ from .tools import (
     changie_new,
     commit_and_open_pr,
     fetch_url,
+    fibery_comment,
+    fibery_state,
     github_comment,
     http_request,
     linear_comment,
@@ -367,6 +369,10 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
     linear_issue = config["configurable"].get("linear_issue", {})
     linear_project_id = linear_issue.get("linear_project_id", "")
     linear_issue_number = linear_issue.get("linear_issue_number", "")
+
+    fibery_entity = config["configurable"].get("fibery_entity", {})
+    fibery_tag = fibery_entity.get("github_tag", "")
+
     agents_md = await read_agents_md_in_sandbox(sandbox_backend, repo_dir)
 
     logger.info("Returning agent with sandbox for thread %s", thread_id)
@@ -376,6 +382,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
             repo_dir,
             linear_project_id=linear_project_id,
             linear_issue_number=linear_issue_number,
+            fibery_tag=fibery_tag,
             agents_md=agents_md,
         ),
         tools=[
@@ -383,6 +390,8 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
             fetch_url,
             changie_new,
             commit_and_open_pr,
+            fibery_comment,
+            fibery_state,
             linear_comment,
             slack_thread_reply,
             github_comment,

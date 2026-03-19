@@ -1,6 +1,8 @@
 from .changie_new import changie_new
 from .commit_and_open_pr import commit_and_open_pr
 from .fetch_url import fetch_url
+from .fibery_comment import fibery_comment
+from .fibery_state import fibery_state
 from .github_comment import github_comment
 from .http_request import http_request
 from .linear_comment import linear_comment
@@ -11,6 +13,8 @@ __all__ = [
     "changie_new",
     "commit_and_open_pr",
     "fetch_url",
+    "fibery_comment",
+    "fibery_state",
     "github_comment",
     "http_request",
     "linear_comment",
