@@ -96,6 +96,9 @@ FIBERY_API_TOKEN = os.environ.get("FIBERY_API_TOKEN", "")
 FIBERY_WORKSPACE_URL = os.environ.get("FIBERY_WORKSPACE_URL", "").rstrip("/")
 FIBERY_WEBHOOK_URL_TOKEN = os.environ.get("FIBERY_WEBHOOK_URL_TOKEN", "")
 
+# Only process Fibery tasks belonging to the Tech department
+_TECH_DEPARTMENT_ID = "491d5ee0-ca9a-11ee-a1e7-19aa7094fda1"
+
 _GITHUB_BOT_MESSAGE_PREFIXES = (
     "🔐 **GitHub Authentication Required**",
     "✅ **Pull Request Created**",
@@ -1712,6 +1715,56 @@ async def fetch_fibery_entity_details(
     }
 
 
+async def _is_tech_department(database_type: str, entity_id: str) -> bool:
+    """Check if a Fibery entity belongs to the Tech department."""
+    space_prefix = database_type.split("/")[0]
+    dept_field = f"{space_prefix}/Department(s)"
+    command = {
+        "command": "fibery.entity/query",
+        "args": {
+            "query": {
+                "q/from": database_type,
+                "q/select": {
+                    "departments": {
+                        "q/from": dept_field,
+                        "q/select": {"id": "fibery/id"},
+                        "q/limit": 50,
+                    },
+                },
+                "q/where": ["=", "fibery/id", "$id"],
+                "q/limit": 1,
+            },
+            "params": {"$id": entity_id},
+        },
+    }
+    async with httpx.AsyncClient(timeout=30) as http_client:
+        try:
+            response = await http_client.post(
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers={
+                    "Authorization": f"Token {FIBERY_API_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json=[command],
+                timeout=30,
+            )
+            response.raise_for_status()
+            results = response.json()
+        except Exception:
+            logger.exception("Failed to check department for entity %s", entity_id)
+            return False
+
+    if not (results and isinstance(results, list) and results[0].get("success")):
+        return False
+
+    rows = results[0].get("result", [])
+    if not rows:
+        return False
+
+    departments = rows[0].get("departments", [])
+    return any(dept.get("id") == _TECH_DEPARTMENT_ID for dept in departments)
+
+
 # Backlog state UUID from Fibery schema (workflow/state_Tools/Task)
 _BACKLOG_STATE_ID = "9ac0d04f-a6f9-4271-b34f-a4919460d770"
 
@@ -1754,6 +1807,10 @@ async def process_fibery_backlog_spec(
     and routes to spec-specific prompt. Only does requirements work, never implementation.
     """
     logger.info("Processing Backlog spec for Fibery entity %s (type=%s)", entity_id, database_type)
+
+    if not await _is_tech_department(database_type, entity_id):
+        logger.info("Skipping Backlog spec for %s — not in Tech department", entity_id)
+        return
 
     full_entity = await fetch_fibery_entity_details(database_type, entity_id)
     if not full_entity:
@@ -1887,6 +1944,10 @@ async def process_fibery_entity(
         actor_user_id: The Fibery user ID of the person who triggered the action.
     """
     logger.info("Processing Fibery entity %s (type=%s)", entity_id, database_type)
+
+    if not await _is_tech_department(database_type, entity_id):
+        logger.info("Skipping Fibery entity %s — not in Tech department", entity_id)
+        return
 
     full_entity = await fetch_fibery_entity_details(database_type, entity_id)
     if not full_entity:
