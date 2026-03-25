@@ -1869,17 +1869,20 @@ async def fibery_webhook(
                         break
 
         if comment_trigger:
-            # For comment triggers, we need to verify @openswe is mentioned
-            # We'll do this in the background task after fetching the comment
+            # Extract the new comment ID from the effect's items array
+            items = effect.get("items", [])
+            comment_id = items[0].get("fibery/id", "") if items else ""
             logger.info(
-                "Potential comment trigger for Fibery entity %s, scheduling verification",
+                "Comment trigger for Fibery entity %s, comment_id=%s, scheduling verification",
                 entity_id,
+                comment_id,
             )
             background_tasks.add_task(
                 _process_fibery_comment_trigger,
                 entity_id,
                 database_type,
                 author_id,
+                comment_id,
             )
         elif state_changed:
             logger.info(
@@ -1901,22 +1904,62 @@ async def _process_fibery_comment_trigger(
     entity_id: str,
     database_type: str,
     actor_user_id: str,
+    comment_id: str = "",
 ) -> None:
     """Verify a Fibery comment trigger contains @openswe and process if so.
 
-    Fibery comment webhooks don't include the comment text, so we fetch
-    the entity's comments and check the most recent one.
+    Fetches only the specific comment by ID (from the webhook payload) rather
+    than loading all comments on the entity.
     """
-    logger.info("Fetching comments for Fibery entity %s (type=%s)", entity_id, database_type)
-    comments = await fibery_fetch_entity_comments(database_type, entity_id)
-    logger.info("Fetched %d comments for Fibery entity %s", len(comments), entity_id)
-    if not comments:
-        logger.info("No comments found for Fibery entity %s", entity_id)
+    if not comment_id:
+        logger.info("No comment_id provided for Fibery entity %s, skipping", entity_id)
         return
 
-    latest_comment = comments[-1]
-    comment_body = latest_comment.get("body", "")
-    logger.info("Latest comment body (first 200 chars): %s", comment_body[:200] if comment_body else "<empty>")
+    # Fetch the single comment's document secret, then its content
+    comment_body = ""
+    comment_cmd = {
+        "command": "fibery.entity/query",
+        "args": {
+            "query": {
+                "q/from": "comments/comment",
+                "q/select": {
+                    "id": "fibery/id",
+                    "secret": "comment/document-secret",
+                },
+                "q/where": ["=", "fibery/id", "$id"],
+                "q/limit": 1,
+            },
+            "params": {"$id": comment_id},
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await client.post(
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers={
+                    "Authorization": f"Token {FIBERY_API_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json=[comment_cmd],
+            )
+            response.raise_for_status()
+            results = response.json()
+            if results and isinstance(results, list) and results[0].get("success"):
+                rows = results[0].get("result", [])
+                if rows:
+                    secret = rows[0].get("secret", "")
+                    if secret:
+                        comment_body = await fibery_fetch_document(secret)
+        except Exception:
+            logger.exception("Failed to fetch comment %s for entity %s", comment_id, entity_id)
+            return
+
+    if not comment_body:
+        logger.info("Empty comment body for comment %s on entity %s", comment_id, entity_id)
+        return
+
+    logger.info("Comment body (first 200 chars): %s", comment_body[:200])
 
     # Bot loop prevention: skip if the comment looks like our own bot message
     bot_prefixes = (
