@@ -25,6 +25,7 @@ from .utils.fibery import (
     fetch_document as fibery_fetch_document,
     fetch_entity as fibery_fetch_entity,
     fetch_entity_comments as fibery_fetch_entity_comments,
+    fetch_entity_repositories as fibery_fetch_entity_repositories,
     fetch_user_email as fibery_fetch_user_email,
 )
 from .utils.comments import get_recent_comments
@@ -1530,36 +1531,40 @@ def parse_repo_field(repo_value: str) -> list[dict[str, str]]:
 async def fetch_fibery_entity_details(
     database_type: str,
     entity_id: str,
-    repo_field: str = "Github Repos",
-    tag_field: str = "Github Tag",
 ) -> dict[str, Any] | None:
     """Fetch full details of a Fibery entity for building the agent prompt.
 
     Fetches the entity fields, resolves rich text descriptions via document secrets,
-    and collects all comments with their content.
+    collects comments, and fetches linked repositories from the Tech/Repository relation.
+
+    Field mapping (Tools/Task schema):
+    - Title: Tools/Name (text, UI title)
+    - Description: Tools/Description (rich text document)
+    - Github Tag: Tools/Github Tag (read-only formula: "[TASK-{PublicId}]")
+    - Repositories: Tools/Repositories (collection → Tech/Repository, Full Name = "owner/repo")
+    - Lead: Tools/Lead (user, used as assignee)
+    - Workflow state: workflow/state (Backlog, In Progress, For Review, Done, etc.)
 
     Args:
-        database_type: The Fibery database type (e.g., "App/Task").
+        database_type: The Fibery database type (e.g., "Tools/Task").
         entity_id: The entity UUID.
-        repo_field: The field name containing target repo(s).
-        tag_field: The field name containing the Github Tag (e.g., "[TASK-1104]").
 
     Returns:
-        Dict with keys: id, title, description, comments, repo_value, github_tag,
-        assignee_id, creator_id, url. Returns None on failure.
+        Dict with keys: id, title, description, comments, repo_configs, github_tag,
+        lead_id, url, database_type. Returns None on failure.
     """
-    name_field = f"{database_type}/name"
-    desc_field = f"{database_type}/description"
-    repo_field_path = f"{database_type}/{repo_field}"
-    tag_field_path = f"{database_type}/{tag_field}"
+    name_field = f"{database_type}/Name"
+    desc_field = f"{database_type}/Description"
+    tag_field = f"{database_type}/Github Tag"
+    lead_field = f"{database_type}/Lead"
 
     fields = [
         "fibery/id",
         "fibery/public-id",
         name_field,
         desc_field,
-        repo_field_path,
-        tag_field_path,
+        tag_field,
+        lead_field,
     ]
 
     entity = await fibery_fetch_entity(database_type, entity_id, fields)
@@ -1579,10 +1584,18 @@ async def fetch_fibery_entity_details(
     # Fetch comments
     comments = await fibery_fetch_entity_comments(database_type, entity_id)
 
+    # Fetch linked repositories from the Tech/Repository collection
+    repo_configs = await fibery_fetch_entity_repositories(database_type, entity_id)
+
     title = entity.get(name_field, "No title")
-    repo_value = entity.get(repo_field_path, "")
-    github_tag = entity.get(tag_field_path, "")
+    github_tag = entity.get(tag_field, "")
     public_id = entity.get("fibery/public-id", "")
+
+    # Extract lead user ID for email resolution
+    lead_value = entity.get(lead_field)
+    lead_id = ""
+    if isinstance(lead_value, dict):
+        lead_id = lead_value.get("fibery/id", "")
 
     entity_url = ""
     if FIBERY_WORKSPACE_URL and public_id:
@@ -1593,8 +1606,9 @@ async def fetch_fibery_entity_details(
         "title": title,
         "description": description or "No description",
         "comments": comments,
-        "repo_value": repo_value if isinstance(repo_value, str) else "",
+        "repo_configs": repo_configs,
         "github_tag": github_tag if isinstance(github_tag, str) else "",
+        "lead_id": lead_id,
         "url": entity_url,
         "database_type": database_type,
     }
@@ -1623,12 +1637,15 @@ async def process_fibery_entity(
         logger.error("Failed to fetch Fibery entity details for %s", entity_id)
         return
 
-    # Resolve user email for GitHub auth
+    # Resolve user email for GitHub auth — try actor first, then entity lead
     user_email = None
     if actor_user_id:
         user_email = await fibery_fetch_user_email(actor_user_id)
+    if not user_email and full_entity.get("lead_id"):
+        user_email = await fibery_fetch_user_email(full_entity["lead_id"])
     if not user_email:
-        logger.warning("Could not resolve email for Fibery user %s", actor_user_id)
+        logger.warning("Could not resolve email for Fibery user (actor=%s, lead=%s)",
+                        actor_user_id, full_entity.get("lead_id"))
 
     title = full_entity["title"]
     description = full_entity["description"]
@@ -1666,17 +1683,16 @@ async def process_fibery_entity(
 
     content_blocks: list[dict[str, Any]] = [create_text_block(prompt)]
 
-    # Parse repos from entity field
-    repo_value = full_entity.get("repo_value", "")
-    repo_configs = parse_repo_field(repo_value)
+    # Get repos from linked Tech/Repository entities
+    repo_configs = full_entity.get("repo_configs", [])
 
     if not repo_configs:
-        logger.error("No valid repos found in Fibery entity %s repo field: '%s'", entity_id, repo_value)
+        logger.error("No repositories linked to Fibery entity %s", entity_id)
         await fibery_create_comment(
             database_type,
             entity_id,
-            "❌ **Agent Error**\n\nNo valid repository found in the repo field. "
-            "Please set the repo field to `owner/repo` format (e.g., `langchain-ai/open-swe`).",
+            "❌ **Agent Error**\n\nNo repositories linked to this entity. "
+            "Please link one or more repositories in the Repositories field.",
         )
         return
 

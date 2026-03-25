@@ -104,6 +104,80 @@ async def fetch_entity(
             return None
 
 
+async def fetch_entity_repositories(
+    database_type: str,
+    entity_id: str,
+    repo_relation: str = "Tools/Repositories",
+) -> list[dict[str, str]]:
+    """Fetch GitHub repositories linked to a Fibery entity.
+
+    Repositories are stored as a collection relation to Tech/Repository entities.
+    Each repository has a "Tech/Full Name" field in "owner/repo" format.
+
+    Args:
+        database_type: The Fibery database type (e.g., "Tools/Task").
+        entity_id: The entity UUID.
+        repo_relation: The relation field name. Defaults to "Tools/Repositories".
+
+    Returns:
+        List of repo config dicts with 'owner' and 'name' keys.
+    """
+    if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
+        return []
+
+    command = {
+        "command": "fibery.entity/query",
+        "args": {
+            "query": {
+                "q/from": database_type,
+                "q/select": {
+                    "repos": {
+                        "q/from": repo_relation,
+                        "q/select": {
+                            "full_name": "Tech/Full Name",
+                            "id": "fibery/id",
+                        },
+                    }
+                },
+                "q/where": ["=", "fibery/id", "$id"],
+                "q/limit": 1,
+            },
+            "params": {"$id": entity_id},
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await _rate_limited_request(
+                client,
+                "POST",
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers=_headers(),
+                json=[command],
+            )
+            response.raise_for_status()
+            results = response.json()
+            if not (results and isinstance(results, list) and results[0].get("success")):
+                return []
+
+            rows = results[0].get("result", [])
+            if not rows:
+                return []
+
+            raw_repos = rows[0].get("repos", [])
+            configs = []
+            for repo in raw_repos:
+                full_name = repo.get("full_name", "")
+                if full_name and "/" in full_name:
+                    owner, name = full_name.split("/", 1)
+                    if owner.strip() and name.strip():
+                        configs.append({"owner": owner.strip(), "name": name.strip()})
+            return configs
+        except Exception:
+            logger.exception("Failed to fetch repositories for entity %s", entity_id)
+            return []
+
+
 async def fetch_document(document_secret: str) -> str:
     """Fetch rich text content from a Fibery document by its secret.
 
