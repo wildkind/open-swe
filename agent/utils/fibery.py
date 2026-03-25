@@ -822,18 +822,14 @@ async def create_task_entity(
         return None
 
     space_prefix = database_type.split("/")[0]
-    doc_secret = str(_uuid.uuid4())
 
-    # Step 1: Create the entity with a pre-generated document secret
+    # Step 1: Create the entity (Fibery auto-creates the Description document)
     create_cmd = {
         "command": "fibery.entity/create",
         "args": {
             "type": database_type,
             "entity": {
                 f"{space_prefix}/Name": title,
-                f"{space_prefix}/Description": {
-                    "Collaboration~Documents/secret": doc_secret,
-                },
             },
         },
     }
@@ -850,7 +846,8 @@ async def create_task_entity(
             response.raise_for_status()
             results = response.json()
             if not (results and isinstance(results, list) and results[0].get("success")):
-                logger.error("Failed to create Fibery entity: %s", title)
+                error_msg = results[0] if results and isinstance(results, list) else results
+                logger.error("Failed to create Fibery entity '%s': %s", title, error_msg)
                 return None
             result = results[0].get("result", {})
             entity_id = result.get("fibery/id", "")
@@ -887,19 +884,26 @@ async def create_task_entity(
                 logger.exception("Failed to set parent for entity %s", entity_id)
 
         # Step 3: Write description document content
+        # Fibery auto-creates the Description document, so we need to fetch its secret first
         if description_md.strip():
-            try:
-                response = await _rate_limited_request(
-                    client,
-                    "PUT",
-                    f"{FIBERY_WORKSPACE_URL}/api/documents/{doc_secret}",
-                    headers=_headers(),
-                    params={"format": "md"},
-                    json={"content": description_md},
-                )
-                response.raise_for_status()
-            except Exception:
-                logger.exception("Failed to set description for entity %s", entity_id)
+            desc_secret = await fetch_entity_document_secret(
+                database_type, entity_id, f"{space_prefix}/Description"
+            )
+            if desc_secret:
+                try:
+                    response = await _rate_limited_request(
+                        client,
+                        "PUT",
+                        f"{FIBERY_WORKSPACE_URL}/api/documents/{desc_secret}",
+                        headers=_headers(),
+                        params={"format": "md"},
+                        json={"content": description_md},
+                    )
+                    response.raise_for_status()
+                except Exception:
+                    logger.exception("Failed to set description for entity %s", entity_id)
+            else:
+                logger.warning("Could not fetch description secret for new entity %s", entity_id)
 
         # Step 4: Fetch public_id for URL construction
         try:
