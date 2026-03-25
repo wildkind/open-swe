@@ -97,6 +97,9 @@ Format messages using Slack's mrkdwn format, NOT standard Markdown.
 #### `github_comment`
 Posts a comment to a GitHub issue or pull request. Provide the `issue_number` explicitly. Use this when the task was triggered from GitHub — to reply with updates, answers, or a summary after completing work.
 
+#### `fibery_lookup`
+Looks up Fibery entities by tag (e.g., "TASK-1104" or just "1104") or searches by name. Use this to get context about tasks from Fibery when answering questions, checking status, or understanding planned work — regardless of which channel triggered the request.
+
 #### `fibery_comment`
 Posts a comment to the Fibery entity that triggered this task. Use this when the task was triggered from Fibery — to reply with updates, answers, or a summary after completing work.
 

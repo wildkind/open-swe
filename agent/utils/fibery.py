@@ -488,6 +488,168 @@ async def update_entity_state(
             return False
 
 
+async def lookup_entity_by_public_id(
+    database_type: str,
+    public_id: str,
+) -> dict[str, Any] | None:
+    """Look up a Fibery entity by its public ID (e.g., "1104" from TASK-1104).
+
+    Returns a summary dict with title, description, state, tag, and URL.
+
+    Args:
+        database_type: The Fibery database type (e.g., "Tools/Task").
+        public_id: The numeric public ID (e.g., "1104").
+
+    Returns:
+        Dict with entity summary, or None if not found.
+    """
+    if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
+        return None
+
+    space_prefix = database_type.split("/")[0]
+    name_field = f"{space_prefix}/Name"
+    desc_field = f"{space_prefix}/Description"
+    tag_field = f"{space_prefix}/Github Tag"
+
+    command = {
+        "command": "fibery.entity/query",
+        "args": {
+            "query": {
+                "q/from": database_type,
+                "q/select": {
+                    "id": "fibery/id",
+                    "public_id": "fibery/public-id",
+                    "name": name_field,
+                    "tag": tag_field,
+                    "desc_secret": [desc_field, "Collaboration~Documents/secret"],
+                    "state": ["workflow/state", "enum/name"],
+                },
+                "q/where": ["=", "fibery/public-id", "$pid"],
+                "q/limit": 1,
+            },
+            "params": {"$pid": public_id},
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await _rate_limited_request(
+                client,
+                "POST",
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers=_headers(),
+                json=[command],
+            )
+            response.raise_for_status()
+            results = response.json()
+            if not (results and isinstance(results, list) and results[0].get("success")):
+                return None
+
+            rows = results[0].get("result", [])
+            if not rows:
+                return None
+
+            row = rows[0]
+            description = ""
+            desc_secret = row.get("desc_secret", "")
+            if desc_secret and isinstance(desc_secret, str):
+                description = await fetch_document(desc_secret)
+
+            pid = row.get("public_id", public_id)
+            entity_url = ""
+            if FIBERY_WORKSPACE_URL and pid:
+                entity_url = f"{FIBERY_WORKSPACE_URL}/{database_type.replace('/', '-')}/{pid}"
+
+            return {
+                "id": row.get("id", ""),
+                "public_id": pid,
+                "title": row.get("name", ""),
+                "description": description or "No description",
+                "state": row.get("state", ""),
+                "github_tag": row.get("tag", ""),
+                "url": entity_url,
+            }
+        except Exception:
+            logger.exception("Failed to look up Fibery entity by public ID %s", public_id)
+            return None
+
+
+async def search_entities(
+    database_type: str,
+    query_text: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Search Fibery entities by name.
+
+    Args:
+        database_type: The Fibery database type (e.g., "Tools/Task").
+        query_text: Text to search for in entity names.
+        limit: Maximum number of results.
+
+    Returns:
+        List of entity summary dicts.
+    """
+    if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
+        return []
+
+    space_prefix = database_type.split("/")[0]
+    name_field = f"{space_prefix}/Name"
+    tag_field = f"{space_prefix}/Github Tag"
+
+    command = {
+        "command": "fibery.entity/query",
+        "args": {
+            "query": {
+                "q/from": database_type,
+                "q/select": {
+                    "id": "fibery/id",
+                    "public_id": "fibery/public-id",
+                    "name": name_field,
+                    "tag": tag_field,
+                    "state": ["workflow/state", "enum/name"],
+                },
+                "q/where": ["q/contains", name_field, "$q"],
+                "q/limit": limit,
+            },
+            "params": {"$q": query_text},
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await _rate_limited_request(
+                client,
+                "POST",
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers=_headers(),
+                json=[command],
+            )
+            response.raise_for_status()
+            results = response.json()
+            if not (results and isinstance(results, list) and results[0].get("success")):
+                return []
+
+            rows = results[0].get("result", [])
+            entities = []
+            for row in rows:
+                pid = row.get("public_id", "")
+                entity_url = ""
+                if FIBERY_WORKSPACE_URL and pid:
+                    entity_url = f"{FIBERY_WORKSPACE_URL}/{database_type.replace('/', '-')}/{pid}"
+                entities.append({
+                    "id": row.get("id", ""),
+                    "public_id": pid,
+                    "title": row.get("name", ""),
+                    "state": row.get("state", ""),
+                    "github_tag": row.get("tag", ""),
+                    "url": entity_url,
+                })
+            return entities
+        except Exception:
+            logger.exception("Failed to search Fibery entities for '%s'", query_text)
+            return []
+
+
 async def fetch_user_email(user_id: str) -> str | None:
     """Fetch a Fibery user's email address.
 
