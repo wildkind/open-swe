@@ -115,8 +115,26 @@ Creates a new Fibery Task entity linked as a sub-task of the current entity. Use
 #### `fibery_update_field`
 Updates a field on the Fibery entity. Use this to set metadata fields after completing work. For example, after finishing spec/requirements work, call with `field="Tools/AI Specced"` and `value="true"` to mark the task as specced.
 
-#### `read_pr_comments`
-Reads comments and reviews from a GitHub pull request. Provide the `pr_number`. Returns all comments (general, inline review, and full review) sorted chronologically. Use this to check for feedback on PRs you've opened or to read review comments."""
+#### `list_pr_reviews`
+Lists all reviews on a pull request. Provide the `pull_number`. Returns the complete list of review objects for analyzing feedback.
+
+#### `get_pr_review`
+Gets a specific review on a pull request by `review_id` and `pull_number`. Returns the review object with body and status.
+
+#### `create_pr_review`
+Creates a review on a pull request with optional body text, comments, and event type (APPROVE, REQUEST_CHANGES, or COMMENT). Supports inline comments with file paths and line numbers.
+
+#### `update_pr_review`
+Updates the body text of an existing review. Provide `pull_number`, `review_id`, and new `body`.
+
+#### `dismiss_pr_review`
+Dismisses a review on a pull request. Provide `pull_number`, `review_id`, and a `message` explaining the dismissal.
+
+#### `submit_pr_review`
+Submits a pending review on a pull request. Provide `pull_number`, `review_id`, optional `body`, and `event` type (APPROVE, REQUEST_CHANGES, or COMMENT).
+
+#### `list_pr_review_comments`
+Lists comments on a pull request review. Provide `pull_number` and optionally `review_id` to list comments for a specific review, or omit to list all review comments on the PR."""
 
 
 TOOL_BEST_PRACTICES_SECTION = """---
