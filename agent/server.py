@@ -377,7 +377,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
 
     logger.info("Returning agent with sandbox for thread %s", thread_id)
     return create_deep_agent(
-        model=make_model("anthropic:claude-opus-4-6", temperature=0, max_tokens=20_000),
+        model=make_model("google_genai:gemini-3.1-pro-preview", temperature=0, max_tokens=20_000, max_retries=3),
         system_prompt=construct_system_prompt(
             repo_dir,
             linear_project_id=linear_project_id,
