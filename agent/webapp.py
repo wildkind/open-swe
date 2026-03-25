@@ -1762,7 +1762,7 @@ async def process_fibery_backlog_spec(
         "`fibery_create_entity` to create sub-tasks if appropriate, "
         "and `fibery_comment` to post a summary of what you added. "
         "After completing spec work, use `fibery_update_field` with "
-        "field=\"Tools/AI Specced\" and value=true to mark the task as specced."
+        "field=\"Tools/AI Specced\" and value=\"true\" to mark the task as specced."
     )
 
     content_blocks: list[dict[str, Any]] = [create_text_block(prompt)]

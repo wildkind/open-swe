@@ -113,7 +113,7 @@ Appends markdown content to a Fibery entity's document field. Use this for requi
 Creates a new Fibery Task entity linked as a sub-task of the current entity. Use this when breaking down a task into smaller pieces. Each call creates one sub-task with a title and optional description, linked to the parent via the Parent Task relation. Aim for no more than ~10 sub-tasks per breakdown.
 
 #### `fibery_update_field`
-Updates a field on the Fibery entity. Use this to set metadata fields after completing work. For example, after finishing spec/requirements work, call with `field="Tools/AI Specced"` and `value=true` to mark the task as specced.
+Updates a field on the Fibery entity. Use this to set metadata fields after completing work. For example, after finishing spec/requirements work, call with `field="Tools/AI Specced"` and `value="true"` to mark the task as specced.
 
 #### `read_pr_comments`
 Reads comments and reviews from a GitHub pull request. Provide the `pr_number`. Returns all comments (general, inline review, and full review) sorted chronologically. Use this to check for feedback on PRs you've opened or to read review comments."""
