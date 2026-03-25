@@ -317,13 +317,19 @@ async def create_comment(
     if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
         return False
 
+    import uuid as _uuid
+
     async with httpx.AsyncClient(timeout=30) as client:
-        # Step 1: Create comment entity — let Fibery auto-generate ID and document secret
+        # Step 1: Create comment entity with a pre-generated document secret
+        # Fibery requires comment/document-secret at creation time.
+        comment_secret = str(_uuid.uuid4())
         create_cmd = {
             "command": "fibery.entity/create",
             "args": {
                 "type": "comments/comment",
-                "entity": {},
+                "entity": {
+                    "comment/document-secret": comment_secret,
+                },
             },
         }
 
@@ -343,7 +349,6 @@ async def create_comment(
                 return False
             result = results[0].get("result", {})
             comment_id = result.get("fibery/id", "")
-            comment_secret = result.get("comment/document-secret", "")
         except Exception:
             logger.exception("Failed to create comment entity (step 1)")
             return False
