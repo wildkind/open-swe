@@ -95,7 +95,6 @@ async def fetch_entity(
             )
             response.raise_for_status()
             results = response.json()
-            logger.info("fetch_entity raw response: %s", str(results)[:1000])
             if results and isinstance(results, list) and results[0].get("success"):
                 rows = results[0].get("result", [])
                 return rows[0] if rows else None
@@ -159,7 +158,6 @@ async def fetch_entity_repositories(
             )
             response.raise_for_status()
             results = response.json()
-            logger.info("fetch_entity_repositories raw response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
                 return []
 
@@ -264,15 +262,11 @@ async def fetch_entity_comments(
             )
             response.raise_for_status()
             results = response.json()
-            logger.info("fetch_entity_comments raw response: %s",
-                        str(results)[:1000])
             if not (results and isinstance(results, list) and results[0].get("success")):
-                logger.info("fetch_entity_comments: query unsuccessful or empty")
                 return []
 
             rows = results[0].get("result", [])
             if not rows:
-                logger.info("fetch_entity_comments: no rows returned")
                 return []
 
             raw_comments = rows[0].get("comments", [])
@@ -343,7 +337,6 @@ async def create_comment(
             )
             response.raise_for_status()
             results = response.json()
-            logger.info("create_comment step 1 response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
                 logger.error("Failed to create comment entity for %s", entity_id)
                 return False
@@ -378,7 +371,6 @@ async def create_comment(
             )
             response.raise_for_status()
             results = response.json()
-            logger.info("create_comment step 2 response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
                 logger.error("Failed to link comment to entity %s (step 2)", entity_id)
                 return False
@@ -454,7 +446,6 @@ async def update_entity_state(
             )
             response.raise_for_status()
             results = response.json()
-            logger.info("update_entity_state lookup response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
                 logger.error("Failed to look up state '%s' in %s", state_name, state_type)
                 return False

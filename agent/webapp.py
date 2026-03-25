@@ -1594,7 +1594,6 @@ async def fetch_fibery_entity_details(
             )
             response.raise_for_status()
             results = response.json()
-            logger.info("fetch_fibery_entity_details raw response: %s", str(results)[:1000])
         except Exception:
             logger.exception("Failed to fetch Fibery entity %s", entity_id)
             return None
@@ -1814,9 +1813,6 @@ async def fibery_webhook(
         logger.exception("Failed to parse Fibery webhook JSON")
         return {"status": "error", "message": "Invalid JSON"}
 
-    logger.info("Fibery webhook payload keys: %s", list(payload.keys()))
-    logger.info("Fibery webhook payload: %s", json.dumps(payload, default=str)[:2000])
-
     # Fibery webhooks v2 send an "effects" array, each with entity changes
     effects = payload.get("effects", [])
     if not effects:
@@ -1846,10 +1842,6 @@ async def fibery_webhook(
         # Detect the trigger type from the effect
         values = effect.get("values", {})
         values_before = effect.get("valuesBefore", {})
-
-        logger.info("Fibery effect for entity %s: effect_type=%s, values=%s",
-                     entity_id, effect_type,
-                     list(values.keys()) if values else "none")
 
         # Detect trigger type from the effect
         comment_trigger = False
@@ -1959,7 +1951,7 @@ async def _process_fibery_comment_trigger(
         logger.info("Empty comment body for comment %s on entity %s", comment_id, entity_id)
         return
 
-    logger.info("Comment body (first 200 chars): %s", comment_body[:200])
+    logger.info("Fibery comment on entity %s mentions @openswe, processing", entity_id)
 
     # Bot loop prevention: skip if the comment looks like our own bot message
     bot_prefixes = (
