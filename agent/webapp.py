@@ -1560,6 +1560,9 @@ async def fetch_fibery_entity_details(
     desc_field = f"{space_prefix}/Description"
     tag_field = f"{space_prefix}/Github Tag"
 
+    brief_field = f"{space_prefix}/Background & Brief"
+    ai_specced_field = f"{space_prefix}/AI Specced"
+
     # Description is a rich text document (not primitive) — needs a nested select
     # to get the document secret, then a separate fetch for the content.
     command = {
@@ -1573,6 +1576,8 @@ async def fetch_fibery_entity_details(
                     "name": name_field,
                     "tag": tag_field,
                     "desc_secret": [desc_field, "Collaboration~Documents/secret"],
+                    "brief_secret": [brief_field, "Collaboration~Documents/secret"],
+                    "ai_specced": ai_specced_field,
                 },
                 "q/where": ["=", "fibery/id", "$id"],
                 "q/limit": 1,
@@ -1614,6 +1619,12 @@ async def fetch_fibery_entity_details(
     if desc_secret and isinstance(desc_secret, str):
         description = await fibery_fetch_document(desc_secret)
 
+    # Resolve Background & Brief from document secret
+    background_brief = ""
+    brief_secret = entity.get("brief_secret", "")
+    if brief_secret and isinstance(brief_secret, str):
+        background_brief = await fibery_fetch_document(brief_secret)
+
     # Fetch comments
     comments = await fibery_fetch_entity_comments(database_type, entity_id)
 
@@ -1634,6 +1645,9 @@ async def fetch_fibery_entity_details(
         "id": entity_id,
         "title": title,
         "description": description or "No description",
+        "background_brief": background_brief,
+        "desc_secret": desc_secret if isinstance(desc_secret, str) else "",
+        "ai_specced": bool(entity.get("ai_specced")),
         "comments": comments,
         "repo_configs": repo_configs,
         "github_tag": github_tag if isinstance(github_tag, str) else "",
@@ -1641,6 +1655,164 @@ async def fetch_fibery_entity_details(
         "url": entity_url,
         "database_type": database_type,
     }
+
+
+# Backlog state UUID from Fibery schema (workflow/state_Tools/Task)
+_BACKLOG_STATE_ID = "9ac0d04f-a6f9-4271-b34f-a4919460d770"
+
+
+def _is_state_backlog(state_value: Any) -> bool:
+    """Check if a webhook state value represents the Backlog state."""
+    if isinstance(state_value, str):
+        return state_value.lower() == "backlog"
+    if isinstance(state_value, dict):
+        if state_value.get("fibery/id") == _BACKLOG_STATE_ID:
+            return True
+        name = state_value.get("enum/name", "")
+        if isinstance(name, str) and name.lower() == "backlog":
+            return True
+    return False
+
+
+_SPEC_KEYWORDS = frozenset({
+    "flesh out", "break down", "break this down", "requirements", "spec",
+    "acceptance criteria", "review the spec", "too vague", "detail",
+    "sub-tasks", "subtasks", "sub tasks", "flesh this out", "specify",
+    "add criteria", "identify gaps", "refine the description",
+})
+
+
+def _is_spec_request(comment: str) -> bool:
+    """Check if a comment is requesting spec/requirements work (not implementation)."""
+    comment_lower = comment.lower()
+    return any(kw in comment_lower for kw in _SPEC_KEYWORDS)
+
+
+async def process_fibery_backlog_spec(
+    entity_id: str,
+    database_type: str,
+    actor_user_id: str = "",
+) -> None:
+    """Auto-spec a Fibery entity that moved to Backlog.
+
+    Checks readiness (content + repo), skips if already specced (AI Specced = true),
+    and routes to spec-specific prompt. Only does requirements work, never implementation.
+    """
+    logger.info("Processing Backlog spec for Fibery entity %s (type=%s)", entity_id, database_type)
+
+    full_entity = await fetch_fibery_entity_details(database_type, entity_id)
+    if not full_entity:
+        logger.error("Failed to fetch Fibery entity details for %s", entity_id)
+        return
+
+    # 1. Skip if already specced
+    if full_entity.get("ai_specced"):
+        logger.info("Skipping Backlog spec for %s — AI Specced is true", entity_id)
+        return
+
+    # 2. Readiness check: content AND repo required
+    description = full_entity.get("description", "")
+    background_brief = full_entity.get("background_brief", "")
+    has_content = (
+        description.strip() not in ("", "No description")
+        or background_brief.strip() != ""
+    )
+    repo_configs = full_entity.get("repo_configs", [])
+
+    missing = []
+    if not has_content:
+        missing.append("a Description or Background & Brief")
+    if not repo_configs:
+        missing.append("at least one linked Repository")
+
+    if missing:
+        logger.info("Backlog spec readiness check failed for %s: missing %s", entity_id, missing)
+        await fibery_create_comment(
+            database_type,
+            entity_id,
+            "⏸️ **Auto-spec paused**\n\n"
+            "I can't flesh out this task yet. Please add:\n"
+            + "\n".join(f"- {m}" for m in missing)
+            + "\n\nOnce added, move the task out of Backlog and back in, "
+            "or comment `@openswe flesh out the requirements`.",
+        )
+        return
+
+    # 3. Resolve user email for GitHub auth
+    user_email = None
+    if actor_user_id:
+        user_email = await fibery_fetch_user_email(actor_user_id)
+    if not user_email and full_entity.get("lead_id"):
+        user_email = await fibery_fetch_user_email(full_entity["lead_id"])
+
+    title = full_entity["title"]
+    github_tag = full_entity["github_tag"]
+    entity_url = full_entity["url"]
+
+    # 4. Build spec-specific prompt
+    prompt = (
+        "A task has been moved to Backlog and needs its requirements fleshed out.\n\n"
+        f"## Entity\n{title}"
+        + (f" ({github_tag})" if github_tag else "")
+        + (f"\n{entity_url}" if entity_url else "")
+        + f"\n\n## Entity Description\n{description}\n\n"
+        + (f"## Background & Brief\n{background_brief}\n\n" if background_brief else "")
+        + "Please flesh out the requirements for this task. "
+        "Use `fibery_update_description` to write the spec (use `field=\"background_brief\"` for tech tasks), "
+        "`fibery_create_entity` to create sub-tasks if appropriate, "
+        "and `fibery_comment` to post a summary of what you added. "
+        "After completing spec work, use `fibery_update_field` with "
+        "field=\"Tools/AI Specced\" and value=true to mark the task as specced."
+    )
+
+    content_blocks: list[dict[str, Any]] = [create_text_block(prompt)]
+
+    # 5. Use first repo only (spec work = single run)
+    repo_config = repo_configs[0] if repo_configs else None
+
+    if repo_config and not _is_repo_org_allowed(repo_config):
+        logger.warning(
+            "Rejecting Backlog spec: org '%s' not in ALLOWED_GITHUB_ORGS",
+            repo_config.get("owner"),
+        )
+        return
+
+    thread_id = generate_thread_id_from_fibery_entity(entity_id)
+
+    configurable: dict[str, Any] = {
+        "repo": repo_config or {},
+        "fibery_entity": {
+            "id": entity_id,
+            "title": title,
+            "url": entity_url,
+            "github_tag": github_tag,
+            "database_type": database_type,
+            "desc_secret": full_entity.get("desc_secret", ""),
+            "brief_secret": full_entity.get("brief_secret", ""),
+        },
+        "user_email": user_email,
+        "source": "fibery",
+    }
+
+    # 6. Check for active thread — skip if busy
+    thread_active = await is_thread_active(thread_id)
+    if thread_active:
+        logger.warning(
+            "Skipping Backlog spec for %s — thread %s is already active",
+            entity_id, thread_id,
+        )
+        return
+
+    logger.info("Creating LangGraph run for Backlog spec, thread %s", thread_id)
+    langgraph_client = get_client(url=LANGGRAPH_URL)
+    await langgraph_client.runs.create(
+        thread_id,
+        "agent",
+        input={"messages": [{"role": "user", "content": content_blocks}]},
+        config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
+        if_not_exists="create",
+    )
+    logger.info("Backlog spec run created for thread %s", thread_id)
 
 
 async def process_fibery_entity(
@@ -1678,6 +1850,7 @@ async def process_fibery_entity(
 
     title = full_entity["title"]
     description = full_entity["description"]
+    background_brief = full_entity.get("background_brief", "")
     github_tag = full_entity["github_tag"]
     entity_url = full_entity["url"]
 
@@ -1690,7 +1863,8 @@ async def process_fibery_entity(
             + (f" ({github_tag})" if github_tag else "")
             + (f"\n{entity_url}" if entity_url else "")
             + f"\n\n## Entity Description\n{description}\n\n"
-            f"## Comment\n{triggering_comment}\n\n"
+            + (f"## Background & Brief\n{background_brief}\n\n" if background_brief else "")
+            + f"## Comment\n{triggering_comment}\n\n"
             "Use `fibery_comment` to communicate on this Fibery entity for clarifications, "
             "status updates, and final summaries. "
             "Use `fibery_state` to update the entity workflow state as you progress."
@@ -1715,18 +1889,31 @@ async def process_fibery_entity(
     # Get repos from linked Tech/Repository entities
     repo_configs = full_entity.get("repo_configs", [])
 
+    is_spec = triggering_comment and _is_spec_request(triggering_comment)
+
     if not repo_configs:
-        logger.error("No repositories linked to Fibery entity %s", entity_id)
-        await fibery_create_comment(
-            database_type,
-            entity_id,
-            "❌ **Agent Error**\n\nNo repositories linked to this entity. "
-            "Please link one or more repositories in the Repositories field.",
-        )
-        return
+        if is_spec:
+            # Spec work can proceed without a repo — run once with no repo
+            logger.info("No repos linked, but spec request — proceeding without repo for entity %s", entity_id)
+            repo_configs = [None]
+        else:
+            logger.error("No repositories linked to Fibery entity %s", entity_id)
+            await fibery_create_comment(
+                database_type,
+                entity_id,
+                "❌ **Agent Error**\n\nNo repositories linked to this entity. "
+                "Please link one or more repositories in the Repositories field.",
+            )
+            return
+
+    # For spec requests on multi-repo entities, only run once to avoid
+    # concurrent writes to the same description document.
+    if is_spec and len(repo_configs) > 1:
+        logger.info("Spec request on multi-repo entity — using first repo only for entity %s", entity_id)
+        repo_configs = repo_configs[:1]
 
     for repo_config in repo_configs:
-        if not _is_repo_org_allowed(repo_config):
+        if repo_config is not None and not _is_repo_org_allowed(repo_config):
             logger.warning(
                 "Rejecting Fibery entity: org '%s' not in ALLOWED_GITHUB_ORGS",
                 repo_config.get("owner"),
@@ -1734,7 +1921,7 @@ async def process_fibery_entity(
             continue
 
         # Use entity+repo for thread ID in multi-repo scenarios
-        if len(repo_configs) > 1:
+        if repo_config is not None and len(repo_configs) > 1:
             thread_id = generate_thread_id_from_fibery_entity(
                 f"{entity_id}:{repo_config['owner']}/{repo_config['name']}"
             )
@@ -1742,13 +1929,15 @@ async def process_fibery_entity(
             thread_id = generate_thread_id_from_fibery_entity(entity_id)
 
         configurable: dict[str, Any] = {
-            "repo": repo_config,
+            "repo": repo_config or {},
             "fibery_entity": {
                 "id": entity_id,
                 "title": title,
                 "url": entity_url,
                 "github_tag": github_tag,
                 "database_type": database_type,
+                "desc_secret": full_entity.get("desc_secret", ""),
+                "brief_secret": full_entity.get("brief_secret", ""),
             },
             "user_email": user_email,
             "source": "fibery",
@@ -1846,6 +2035,7 @@ async def fibery_webhook(
         # Detect trigger type from the effect
         comment_trigger = False
         state_changed = False
+        new_state_value = None
 
         # Comment added: effect is "fibery.entity/add-collection-items" on "comments/comments"
         if effect_type == "fibery.entity/add-collection-items" and effect.get("field") == "comments/comments":
@@ -1858,6 +2048,7 @@ async def fibery_webhook(
                     new_val = values.get(key)
                     if old_val != new_val:
                         state_changed = True
+                        new_state_value = new_val
                         break
 
         if comment_trigger:
@@ -1877,17 +2068,29 @@ async def fibery_webhook(
                 comment_id,
             )
         elif state_changed:
-            logger.info(
-                "State change trigger for Fibery entity %s, scheduling processing",
-                entity_id,
-            )
-            background_tasks.add_task(
-                process_fibery_entity,
-                entity_id,
-                database_type,
-                "",  # no triggering comment for state changes
-                author_id,
-            )
+            if _is_state_backlog(new_state_value):
+                logger.info(
+                    "Backlog state change for Fibery entity %s, scheduling spec work",
+                    entity_id,
+                )
+                background_tasks.add_task(
+                    process_fibery_backlog_spec,
+                    entity_id,
+                    database_type,
+                    author_id,
+                )
+            else:
+                logger.info(
+                    "State change trigger for Fibery entity %s, scheduling processing",
+                    entity_id,
+                )
+                background_tasks.add_task(
+                    process_fibery_entity,
+                    entity_id,
+                    database_type,
+                    "",  # no triggering comment for state changes
+                    author_id,
+                )
 
     return {"status": "accepted", "message": "Processing Fibery webhook effects"}
 

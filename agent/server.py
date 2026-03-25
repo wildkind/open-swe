@@ -38,8 +38,11 @@ from .tools import (
     commit_and_open_pr,
     fetch_url,
     fibery_comment,
+    fibery_create_entity,
     fibery_lookup,
     fibery_state,
+    fibery_update_description,
+    fibery_update_field,
     github_comment,
     http_request,
     linear_comment,
@@ -363,9 +366,15 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
 
     SANDBOX_BACKENDS[thread_id] = sandbox_backend
 
-    if not repo_dir:
+    # Repo is required for implementation work, but optional for spec-only runs
+    repo_config = config["configurable"].get("repo", {})
+    if not repo_dir and repo_config.get("owner"):
         msg = "Cannot proceed: no repo was cloned. Set 'repo.owner' and 'repo.name' in the configurable config"
         raise RuntimeError(msg)
+
+    if not repo_dir:
+        # Spec-only run without a repo — use sandbox home as working dir
+        repo_dir = "/home/user"
 
     linear_issue = config["configurable"].get("linear_issue", {})
     linear_project_id = linear_issue.get("linear_project_id", "")
@@ -392,8 +401,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
             changie_new,
             commit_and_open_pr,
             fibery_comment,
+            fibery_create_entity,
             fibery_lookup,
             fibery_state,
+            fibery_update_description,
+            fibery_update_field,
             linear_comment,
             slack_thread_reply,
             github_comment,

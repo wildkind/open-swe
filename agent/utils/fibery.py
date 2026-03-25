@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid as _uuid
 from typing import Any
 
 import httpx
@@ -310,8 +311,6 @@ async def create_comment(
     """
     if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
         return False
-
-    import uuid as _uuid
 
     async with httpx.AsyncClient(timeout=30) as client:
         # Step 1: Create comment entity with a pre-generated document secret
@@ -697,3 +696,297 @@ async def fetch_user_email(user_id: str) -> str | None:
         except Exception:
             logger.exception("Failed to fetch Fibery user email for %s", user_id)
             return None
+
+
+async def fetch_entity_document_secret(
+    database_type: str,
+    entity_id: str,
+    field: str,
+) -> str | None:
+    """Fetch the document secret for an entity's document field.
+
+    Args:
+        database_type: The Fibery database type (e.g., "Tools/Task").
+        entity_id: The entity UUID.
+        field: The document field name (e.g., "Tools/Description").
+
+    Returns:
+        The document secret string, or None if not found.
+    """
+    if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
+        return None
+
+    command = {
+        "command": "fibery.entity/query",
+        "args": {
+            "query": {
+                "q/from": database_type,
+                "q/select": {
+                    "secret": [field, "Collaboration~Documents/secret"],
+                },
+                "q/where": ["=", "fibery/id", "$id"],
+                "q/limit": 1,
+            },
+            "params": {"$id": entity_id},
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await _rate_limited_request(
+                client,
+                "POST",
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers=_headers(),
+                json=[command],
+            )
+            response.raise_for_status()
+            results = response.json()
+            if results and isinstance(results, list) and results[0].get("success"):
+                rows = results[0].get("result", [])
+                if rows:
+                    secret = rows[0].get("secret")
+                    if secret and isinstance(secret, str):
+                        return secret
+            return None
+        except Exception:
+            logger.exception("Failed to fetch document secret for entity %s field %s", entity_id, field)
+            return None
+
+
+async def update_document(
+    document_secret: str,
+    content: str,
+    append: bool = True,
+) -> bool:
+    """Write or append markdown content to a Fibery document.
+
+    When append=True, fetches current content first, concatenates with a
+    separator, then writes the combined content. The PUT endpoint replaces
+    the entire document.
+
+    Args:
+        document_secret: The document secret.
+        content: Markdown content to write or append.
+        append: If True, append to existing content. If False, replace.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
+        return False
+
+    if not document_secret or not content.strip():
+        return False
+
+    if append:
+        existing = await fetch_document(document_secret)
+        if existing.strip():
+            content = existing.rstrip() + "\n\n---\n\n" + content
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await _rate_limited_request(
+                client,
+                "PUT",
+                f"{FIBERY_WORKSPACE_URL}/api/documents/{document_secret}",
+                headers=_headers(),
+                params={"format": "md"},
+                json={"content": content},
+            )
+            response.raise_for_status()
+            return True
+        except Exception:
+            logger.exception("Failed to update Fibery document %s", document_secret)
+            return False
+
+
+async def create_task_entity(
+    title: str,
+    description_md: str = "",
+    parent_entity_id: str | None = None,
+    database_type: str = "Tools/Task",
+) -> dict[str, Any] | None:
+    """Create a new Fibery Task entity with optional description and parent link.
+
+    Args:
+        title: The task title.
+        description_md: Optional markdown description.
+        parent_entity_id: Optional parent entity UUID to link as sub-task.
+        database_type: The Fibery database type. Defaults to "Tools/Task".
+
+    Returns:
+        Dict with id, public_id, url keys, or None on failure.
+    """
+    if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
+        return None
+
+    space_prefix = database_type.split("/")[0]
+    doc_secret = str(_uuid.uuid4())
+
+    # Step 1: Create the entity with a pre-generated document secret
+    create_cmd = {
+        "command": "fibery.entity/create",
+        "args": {
+            "type": database_type,
+            "entity": {
+                f"{space_prefix}/Name": title,
+                f"{space_prefix}/Description": {
+                    "Collaboration~Documents/secret": doc_secret,
+                },
+            },
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await _rate_limited_request(
+                client,
+                "POST",
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers=_headers(),
+                json=[create_cmd],
+            )
+            response.raise_for_status()
+            results = response.json()
+            if not (results and isinstance(results, list) and results[0].get("success")):
+                logger.error("Failed to create Fibery entity: %s", title)
+                return None
+            result = results[0].get("result", {})
+            entity_id = result.get("fibery/id", "")
+        except Exception:
+            logger.exception("Failed to create Fibery entity: %s", title)
+            return None
+
+        if not entity_id:
+            logger.error("No entity ID returned for: %s", title)
+            return None
+
+        # Step 2: Set parent task if provided
+        if parent_entity_id:
+            update_cmd = {
+                "command": "fibery.entity/update",
+                "args": {
+                    "type": database_type,
+                    "entity": {
+                        "fibery/id": entity_id,
+                        f"{space_prefix}/Parent Task": {"fibery/id": parent_entity_id},
+                    },
+                },
+            }
+            try:
+                response = await _rate_limited_request(
+                    client,
+                    "POST",
+                    f"{FIBERY_WORKSPACE_URL}/api/commands",
+                    headers=_headers(),
+                    json=[update_cmd],
+                )
+                response.raise_for_status()
+            except Exception:
+                logger.exception("Failed to set parent for entity %s", entity_id)
+
+        # Step 3: Write description document content
+        if description_md.strip():
+            try:
+                response = await _rate_limited_request(
+                    client,
+                    "PUT",
+                    f"{FIBERY_WORKSPACE_URL}/api/documents/{doc_secret}",
+                    headers=_headers(),
+                    params={"format": "md"},
+                    json={"content": description_md},
+                )
+                response.raise_for_status()
+            except Exception:
+                logger.exception("Failed to set description for entity %s", entity_id)
+
+        # Step 4: Fetch public_id for URL construction
+        try:
+            query_cmd = {
+                "command": "fibery.entity/query",
+                "args": {
+                    "query": {
+                        "q/from": database_type,
+                        "q/select": {"public_id": "fibery/public-id"},
+                        "q/where": ["=", "fibery/id", "$id"],
+                        "q/limit": 1,
+                    },
+                    "params": {"$id": entity_id},
+                },
+            }
+            response = await _rate_limited_request(
+                client,
+                "POST",
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers=_headers(),
+                json=[query_cmd],
+            )
+            response.raise_for_status()
+            results = response.json()
+            public_id = ""
+            if results and isinstance(results, list) and results[0].get("success"):
+                rows = results[0].get("result", [])
+                if rows:
+                    public_id = str(rows[0].get("public_id", ""))
+        except Exception:
+            logger.exception("Failed to fetch public_id for entity %s", entity_id)
+            public_id = ""
+
+        entity_url = ""
+        if FIBERY_WORKSPACE_URL and public_id:
+            entity_url = f"{FIBERY_WORKSPACE_URL}/{database_type.replace('/', '-')}/{public_id}"
+
+        return {
+            "id": entity_id,
+            "public_id": public_id,
+            "url": entity_url,
+        }
+
+
+async def update_entity_field(
+    database_type: str,
+    entity_id: str,
+    field: str,
+    value: Any,
+) -> bool:
+    """Update a single field on a Fibery entity.
+
+    Args:
+        database_type: The Fibery database type (e.g., "Tools/Task").
+        entity_id: The entity UUID.
+        field: The field name (e.g., "Tools/AI Specced").
+        value: The value to set.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
+        return False
+
+    command = {
+        "command": "fibery.entity/update",
+        "args": {
+            "type": database_type,
+            "entity": {
+                "fibery/id": entity_id,
+                field: value,
+            },
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await _rate_limited_request(
+                client,
+                "POST",
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers=_headers(),
+                json=[command],
+            )
+            response.raise_for_status()
+            results = response.json()
+            return bool(results and isinstance(results, list) and results[0].get("success"))
+        except Exception:
+            logger.exception("Failed to update field %s for entity %s", field, entity_id)
+            return False

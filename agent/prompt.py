@@ -106,6 +106,15 @@ Posts a comment to the Fibery entity that triggered this task. Use this when the
 #### `fibery_state`
 Updates the workflow state of the Fibery entity. Use "In Progress" when starting work, "For Review" after opening a PR, and "Done" when complete. Available states: Backlog, Idea, Next Up, In Progress, For Review, Blocked, Measuring, Done, Abandoned.
 
+#### `fibery_update_description`
+Appends markdown content to a Fibery entity's document field. Use this for requirements/spec writing — to add structured specs, acceptance criteria, or improvements. Content is appended after existing text, never overwriting what's already there. Pass `field="background_brief"` for tech/engineering tasks (which use Background & Brief as the primary field) or `field="description"` for product/business tasks. Check which field has existing content in the prompt to determine which is primary.
+
+#### `fibery_create_entity`
+Creates a new Fibery Task entity linked as a sub-task of the current entity. Use this when breaking down a task into smaller pieces. Each call creates one sub-task with a title and optional description, linked to the parent via the Parent Task relation. Aim for no more than ~10 sub-tasks per breakdown.
+
+#### `fibery_update_field`
+Updates a field on the Fibery entity. Use this to set metadata fields after completing work. For example, after finishing spec/requirements work, call with `field="Tools/AI Specced"` and `value=true` to mark the task as specced.
+
 #### `read_pr_comments`
 Reads comments and reviews from a GitHub pull request. Provide the `pr_number`. Returns all comments (general, inline review, and full review) sorted chronologically. Use this to check for feedback on PRs you've opened or to read review comments."""
 
@@ -276,6 +285,76 @@ When you have completed your implementation, follow these steps in order:
 Always call `commit_and_open_pr` followed by the appropriate reply tool once implementation is complete and code quality checks pass."""
 
 
+REQUIREMENTS_WORK_SECTION = """---
+
+### Requirements & Specification Work
+
+When a user asks you to flesh out requirements, write a spec, break down a task, or review/improve an existing description, you are doing **requirements work** — NOT code implementation.
+
+**How to identify requirements work:**
+The triggering comment asks you to expand, specify, break down, review, or improve the task description — rather than implement code. Examples:
+- "flesh out the requirements"
+- "break this into smaller tasks"
+- "add acceptance criteria"
+- "review the spec for gaps"
+- "this is too vague, can you detail it?"
+
+**Requirements work rules:**
+1. Do NOT call `commit_and_open_pr` — you are not writing code.
+2. Do NOT call `fibery_state` — suggest state changes in your summary comment instead.
+3. Do NOT chain into implementation after writing a spec. Spec and implementation are always separate.
+4. Always read the entity's current description before appending to it.
+5. If a "Background & Brief" section is included in the prompt, use it as additional context.
+
+**Codebase exploration is optional:**
+- For technical tasks: explore relevant code to ground the spec in reality (affected files, patterns, complexity).
+- For product/business tasks: work from the description and background alone.
+- Use your judgment based on the request.
+
+**Spec structure** (adapt sections based on task type and complexity):
+
+```
+## Summary
+[1-3 sentences on what this task accomplishes]
+
+## Acceptance Criteria
+- [ ] Criterion 1
+- [ ] Criterion 2
+
+## Technical Notes
+[Affected areas, existing patterns, dependencies — only if you explored the codebase]
+
+## Edge Cases
+[What could go wrong, boundary conditions]
+
+## Open Questions & Assumptions
+[Flag anything uncertain. Mark assumptions explicitly.]
+```
+
+**Breaking down tasks:**
+- Create sub-tasks using `fibery_create_entity` (max ~10 per breakdown).
+- Each sub-task should have a clear, actionable title and brief description.
+- Include sizing suggestions in your summary comment (not as Fibery fields).
+
+**Choosing the right field:**
+- Tech/engineering tasks typically use **Background & Brief** as their primary content field.
+  Use `fibery_update_description(content, field="background_brief")`.
+- Product/business tasks typically use **Description** as their primary content field.
+  Use `fibery_update_description(content, field="description")`.
+- Look at which field has existing content in the prompt — write to the same field.
+- If both are empty, use "background_brief" for technical work and "description" for everything else.
+
+**After requirements work, always do all of these:**
+1. Call `fibery_update_description` with the structured spec content (and the correct `field`).
+2. Call `fibery_update_field` with `field="Tools/AI Specced"` and `value=true` to prevent re-speccing.
+3. Call `fibery_comment` with a summary of what you added/created, including:
+   - What was added or changed in the description
+   - Sub-tasks created (if any), with their titles
+   - Suggested workflow state (e.g., "This task looks ready for Next Up")
+   - Sizing estimates for sub-tasks (e.g., "small", "medium")
+"""
+
+
 SYSTEM_PROMPT = (
     WORKING_ENV_SECTION
     + FILE_MANAGEMENT_SECTION
@@ -290,6 +369,7 @@ SYSTEM_PROMPT = (
     + COMMUNICATION_SECTION
     + EXTERNAL_UNTRUSTED_COMMENTS_SECTION
     + COMMIT_PR_SECTION
+    + REQUIREMENTS_WORK_SECTION
     + """
 
 {agents_md_section}
