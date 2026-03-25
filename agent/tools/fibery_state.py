@@ -13,10 +13,13 @@ def fibery_state(state_name: str) -> dict[str, Any]:
 
     **When to use:**
     - After starting work, update state to "In Progress".
-    - After calling `commit_and_open_pr`, update state to "PR Ready" or equivalent.
+    - After calling `commit_and_open_pr`, update state to "For Review".
+    - When work is fully complete, update state to "Done".
+
+    Available states: Backlog, Idea, Next Up, In Progress, For Review, Blocked, Measuring, Done, Abandoned.
 
     Args:
-        state_name: The target workflow state name (e.g., "In Progress", "PR Ready").
+        state_name: The target workflow state name (e.g., "In Progress", "For Review", "Done").
 
     Returns:
         Dictionary with 'success' (bool) key.

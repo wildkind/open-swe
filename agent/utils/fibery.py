@@ -95,6 +95,7 @@ async def fetch_entity(
             )
             response.raise_for_status()
             results = response.json()
+            logger.info("fetch_entity raw response: %s", str(results)[:1000])
             if results and isinstance(results, list) and results[0].get("success"):
                 rows = results[0].get("result", [])
                 return rows[0] if rows else None
@@ -137,6 +138,7 @@ async def fetch_entity_repositories(
                             "full_name": "Tech/Full Name",
                             "id": "fibery/id",
                         },
+                        "q/limit": 20,
                     }
                 },
                 "q/where": ["=", "fibery/id", "$id"],
@@ -157,6 +159,7 @@ async def fetch_entity_repositories(
             )
             response.raise_for_status()
             results = response.json()
+            logger.info("fetch_entity_repositories raw response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
                 return []
 
@@ -238,10 +241,9 @@ async def fetch_entity_comments(
                         "q/from": "comments/comments",
                         "q/select": {
                             "id": "fibery/id",
-                            "secret": "Collaboration~Documents/secret",
-                            "author_id": "comments/author",
+                            "secret": "comment/document-secret",
                         },
-                        "q/order-by": [["fibery/creation-date", "q/asc"]],
+                        "q/limit": 50,
                     }
                 },
                 "q/where": ["=", "fibery/id", "$id"],
@@ -262,11 +264,15 @@ async def fetch_entity_comments(
             )
             response.raise_for_status()
             results = response.json()
+            logger.info("fetch_entity_comments raw response: %s",
+                        str(results)[:1000])
             if not (results and isinstance(results, list) and results[0].get("success")):
+                logger.info("fetch_entity_comments: query unsuccessful or empty")
                 return []
 
             rows = results[0].get("result", [])
             if not rows:
+                logger.info("fetch_entity_comments: no rows returned")
                 return []
 
             raw_comments = rows[0].get("comments", [])
@@ -279,7 +285,6 @@ async def fetch_entity_comments(
                 comments.append(
                     {
                         "id": raw.get("id", ""),
-                        "author_id": raw.get("author_id", ""),
                         "body": body,
                     }
                 )
@@ -313,15 +318,12 @@ async def create_comment(
         return False
 
     async with httpx.AsyncClient(timeout=30) as client:
-        # Step 1: Create the comment entity
-        import uuid
-
-        comment_id = str(uuid.uuid4())
+        # Step 1: Create comment entity — let Fibery auto-generate ID and document secret
         create_cmd = {
             "command": "fibery.entity/create",
             "args": {
                 "type": "comments/comment",
-                "entity": {"fibery/id": comment_id},
+                "entity": {},
             },
         }
 
@@ -335,16 +337,19 @@ async def create_comment(
             )
             response.raise_for_status()
             results = response.json()
+            logger.info("create_comment step 1 response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
                 logger.error("Failed to create comment entity for %s", entity_id)
                 return False
-            comment_secret = (
-                results[0]
-                .get("result", {})
-                .get("Collaboration~Documents/secret", "")
-            )
+            result = results[0].get("result", {})
+            comment_id = result.get("fibery/id", "")
+            comment_secret = result.get("comment/document-secret", "")
         except Exception:
             logger.exception("Failed to create comment entity (step 1)")
+            return False
+
+        if not comment_id:
+            logger.error("No comment ID returned for entity %s", entity_id)
             return False
 
         # Step 2: Link comment to parent entity
@@ -368,6 +373,7 @@ async def create_comment(
             )
             response.raise_for_status()
             results = response.json()
+            logger.info("create_comment step 2 response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
                 logger.error("Failed to link comment to entity %s (step 2)", entity_id)
                 return False
@@ -416,8 +422,9 @@ async def update_entity_state(
     if not FIBERY_API_TOKEN or not FIBERY_WORKSPACE_URL:
         return False
 
-    # First, look up the state ID by name
-    state_type = f"{database_type}/{workflow_field}"
+    # The workflow state enum type follows the pattern "workflow/state_{DatabaseType}"
+    # e.g., for "Tools/Task" → "workflow/state_Tools/Task"
+    state_type = f"workflow/state_{database_type}"
     lookup_cmd = {
         "command": "fibery.entity/query",
         "args": {
@@ -442,8 +449,9 @@ async def update_entity_state(
             )
             response.raise_for_status()
             results = response.json()
+            logger.info("update_entity_state lookup response: %s", str(results)[:500])
             if not (results and isinstance(results, list) and results[0].get("success")):
-                logger.error("Failed to look up state '%s'", state_name)
+                logger.error("Failed to look up state '%s' in %s", state_name, state_type)
                 return False
 
             rows = results[0].get("result", [])

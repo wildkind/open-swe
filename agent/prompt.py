@@ -101,7 +101,7 @@ Posts a comment to a GitHub issue or pull request. Provide the `issue_number` ex
 Posts a comment to the Fibery entity that triggered this task. Use this when the task was triggered from Fibery — to reply with updates, answers, or a summary after completing work.
 
 #### `fibery_state`
-Updates the workflow state of the Fibery entity (e.g., "In Progress", "PR Ready"). Use this after starting work and after opening a PR to keep the entity status current.
+Updates the workflow state of the Fibery entity. Use "In Progress" when starting work, "For Review" after opening a PR, and "Done" when complete. Available states: Backlog, Idea, Next Up, In Progress, For Review, Blocked, Measuring, Done, Abandoned.
 
 #### `read_pr_comments`
 Reads comments and reviews from a GitHub pull request. Provide the `pr_number`. Returns all comments (general, inline review, and full review) sorted chronologically. Use this to check for feedback on PRs you've opened or to read review comments."""

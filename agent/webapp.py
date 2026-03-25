@@ -1553,33 +1553,67 @@ async def fetch_fibery_entity_details(
         Dict with keys: id, title, description, comments, repo_configs, github_tag,
         lead_id, url, database_type. Returns None on failure.
     """
-    name_field = f"{database_type}/Name"
-    desc_field = f"{database_type}/Description"
-    tag_field = f"{database_type}/Github Tag"
-    lead_field = f"{database_type}/Lead"
+    # Fibery field names use the space prefix, not the full database type.
+    # e.g., for "Tools/Task", fields are "Tools/Name", not "Tools/Task/Name".
+    space_prefix = database_type.split("/")[0]
+    name_field = f"{space_prefix}/Name"
+    desc_field = f"{space_prefix}/Description"
+    tag_field = f"{space_prefix}/Github Tag"
 
-    fields = [
-        "fibery/id",
-        "fibery/public-id",
-        name_field,
-        desc_field,
-        tag_field,
-        lead_field,
-    ]
+    # Description is a rich text document (not primitive) — needs a nested select
+    # to get the document secret, then a separate fetch for the content.
+    command = {
+        "command": "fibery.entity/query",
+        "args": {
+            "query": {
+                "q/from": database_type,
+                "q/select": {
+                    "id": "fibery/id",
+                    "public_id": "fibery/public-id",
+                    "name": name_field,
+                    "tag": tag_field,
+                    "desc_secret": [desc_field, "Collaboration~Documents/secret"],
+                },
+                "q/where": ["=", "fibery/id", "$id"],
+                "q/limit": 1,
+            },
+            "params": {"$id": entity_id},
+        },
+    }
 
-    entity = await fibery_fetch_entity(database_type, entity_id, fields)
-    if not entity:
+    async with httpx.AsyncClient(timeout=30) as http_client:
+        try:
+            response = await http_client.post(
+                f"{FIBERY_WORKSPACE_URL}/api/commands",
+                headers={
+                    "Authorization": f"Token {FIBERY_API_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json=[command],
+                timeout=30,
+            )
+            response.raise_for_status()
+            results = response.json()
+            logger.info("fetch_fibery_entity_details raw response: %s", str(results)[:1000])
+        except Exception:
+            logger.exception("Failed to fetch Fibery entity %s", entity_id)
+            return None
+
+    if not (results and isinstance(results, list) and results[0].get("success")):
+        logger.error("Fibery entity query failed for %s", entity_id)
         return None
 
-    # Resolve description (rich text field returns a document secret)
+    rows = results[0].get("result", [])
+    if not rows:
+        return None
+
+    entity = rows[0]
+
+    # Resolve description from document secret (fetched via path select)
     description = ""
-    desc_value = entity.get(desc_field)
-    if isinstance(desc_value, dict):
-        secret = desc_value.get("secret")
-        if secret:
-            description = await fibery_fetch_document(secret)
-    elif isinstance(desc_value, str):
-        description = desc_value
+    desc_secret = entity.get("desc_secret", "")
+    if desc_secret and isinstance(desc_secret, str):
+        description = await fibery_fetch_document(desc_secret)
 
     # Fetch comments
     comments = await fibery_fetch_entity_comments(database_type, entity_id)
@@ -1587,15 +1621,11 @@ async def fetch_fibery_entity_details(
     # Fetch linked repositories from the Tech/Repository collection
     repo_configs = await fibery_fetch_entity_repositories(database_type, entity_id)
 
-    title = entity.get(name_field, "No title")
-    github_tag = entity.get(tag_field, "")
-    public_id = entity.get("fibery/public-id", "")
+    title = entity.get("name", "No title")
+    github_tag = entity.get("tag", "")
+    public_id = entity.get("public_id", "")
 
-    # Extract lead user ID for email resolution
-    lead_value = entity.get(lead_field)
-    lead_id = ""
-    if isinstance(lead_value, dict):
-        lead_id = lead_value.get("fibery/id", "")
+    lead_id = ""  # TODO: fetch via nested query if needed
 
     entity_url = ""
     if FIBERY_WORKSPACE_URL and public_id:
@@ -1877,13 +1907,16 @@ async def _process_fibery_comment_trigger(
     Fibery comment webhooks don't include the comment text, so we fetch
     the entity's comments and check the most recent one.
     """
+    logger.info("Fetching comments for Fibery entity %s (type=%s)", entity_id, database_type)
     comments = await fibery_fetch_entity_comments(database_type, entity_id)
+    logger.info("Fetched %d comments for Fibery entity %s", len(comments), entity_id)
     if not comments:
-        logger.debug("No comments found for Fibery entity %s", entity_id)
+        logger.info("No comments found for Fibery entity %s", entity_id)
         return
 
     latest_comment = comments[-1]
     comment_body = latest_comment.get("body", "")
+    logger.info("Latest comment body (first 200 chars): %s", comment_body[:200] if comment_body else "<empty>")
 
     # Bot loop prevention: skip if the comment looks like our own bot message
     bot_prefixes = (
