@@ -1784,35 +1784,37 @@ async def fibery_webhook(
         logger.exception("Failed to parse Fibery webhook JSON")
         return {"status": "error", "message": "Invalid JSON"}
 
-    # Fibery webhooks v2 send an array of events
-    events = payload.get("events", [])
-    if not events:
-        logger.debug("No events in Fibery webhook payload")
-        return {"status": "ignored", "reason": "No events"}
+    logger.info("Fibery webhook payload keys: %s", list(payload.keys()))
+    logger.info("Fibery webhook payload: %s", json.dumps(payload, default=str)[:2000])
 
-    for event in events:
-        entity_id = event.get("id", "")
-        database_type = event.get("type", "")
+    # Fibery webhooks v2 send an "effects" array, each with entity changes
+    effects = payload.get("effects", [])
+    if not effects:
+        logger.info("No effects in Fibery webhook payload (keys: %s)", list(payload.keys()))
+        return {"status": "ignored", "reason": "No effects"}
+
+    # The database type comes from the top-level webhook config, not per-effect
+    database_type = payload.get("type", "")
+    author_id = payload.get("authorId", "")
+
+    for effect in effects:
+        entity_id = effect.get("id", "")
 
         if not entity_id or not database_type:
-            logger.debug("Skipping Fibery event with missing id or type")
+            logger.debug("Skipping Fibery effect with missing id or type")
             continue
 
-        # Detect the trigger type from the event
-        values = event.get("values", {})
-        values_before = event.get("valuesBefore", {})
+        # Detect the trigger type from the effect
+        values = effect.get("values", {})
+        values_before = effect.get("valuesBefore", {})
 
-        # Check for comment trigger: look for new comment mentioning @openswe
-        # Comment events appear as entity updates — we need to fetch comments
-        # and check the latest one
-        comment_trigger = False
-        triggering_comment = ""
-        actor_user_id = ""
+        logger.info("Fibery effect for entity %s: values=%s, valuesBefore=%s",
+                     entity_id, list(values.keys()) if values else "none",
+                     list(values_before.keys()) if values_before else "none")
 
         # Check for workflow state change trigger
         state_changed = False
         if values and values_before:
-            # State change events include workflow/state in values/valuesBefore
             for key in values:
                 if "state" in key.lower() or "workflow" in key.lower():
                     old_val = values_before.get(key)
@@ -1821,15 +1823,8 @@ async def fibery_webhook(
                         state_changed = True
                         break
 
-        # If no state change, check if this might be a comment event
-        # Fibery comment creation events still require fetching comment content
-        if not state_changed:
-            comment_trigger = True
-
-        # Get the actor (user who made the change)
-        actor = event.get("actor", {})
-        if isinstance(actor, dict):
-            actor_user_id = actor.get("id", "")
+        # If no state change, treat as a potential comment event
+        comment_trigger = not state_changed
 
         if comment_trigger:
             # For comment triggers, we need to verify @openswe is mentioned
@@ -1842,7 +1837,7 @@ async def fibery_webhook(
                 _process_fibery_comment_trigger,
                 entity_id,
                 database_type,
-                actor_user_id,
+                author_id,
             )
         elif state_changed:
             logger.info(
@@ -1854,10 +1849,10 @@ async def fibery_webhook(
                 entity_id,
                 database_type,
                 "",  # no triggering comment for state changes
-                actor_user_id,
+                author_id,
             )
 
-    return {"status": "accepted", "message": "Processing Fibery webhook events"}
+    return {"status": "accepted", "message": "Processing Fibery webhook effects"}
 
 
 async def _process_fibery_comment_trigger(
