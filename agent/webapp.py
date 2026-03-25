@@ -1682,34 +1682,34 @@ async def process_fibery_entity(
     github_tag = full_entity["github_tag"]
     entity_url = full_entity["url"]
 
-    # Build comments text
-    comments_text = ""
-    comments = full_entity.get("comments", [])
-    if comments:
-        comments_text = "\n\n## Comments:\n"
-        for comment in comments:
-            body = comment.get("body", "")
-            if body:
-                comments_text += f"\n{body}\n"
-
-    # Add triggering comment if not already in comments
     if triggering_comment:
-        if not comments_text:
-            comments_text = "\n\n## Comments:\n"
-        comments_text += f"\n{triggering_comment}\n"
-
-    tag_line = f"## Fibery Tag: {github_tag}\n\n" if github_tag else ""
-    url_line = f"## Fibery Entity: {entity_url}\n\n" if entity_url else ""
-    prompt = (
-        f"Please work on the following issue:\n\n"
-        f"## Title: {title}\n\n"
-        f"{tag_line}"
-        f"{url_line}"
-        f"## Description:\n{description}\n"
-        f"{comments_text}\n\n"
-        f"Please analyze this issue and implement the necessary changes. "
-        f"When you're done, commit and push your changes."
-    )
+        # Comment-triggered: Slack-style prompt focused on the mention request,
+        # with entity context as background.
+        prompt = (
+            "You were mentioned in a Fibery comment.\n\n"
+            f"## Entity\n{title}"
+            + (f" ({github_tag})" if github_tag else "")
+            + (f"\n{entity_url}" if entity_url else "")
+            + f"\n\n## Entity Description\n{description}\n\n"
+            f"## Comment\n{triggering_comment}\n\n"
+            "Use `fibery_comment` to communicate on this Fibery entity for clarifications, "
+            "status updates, and final summaries. "
+            "Use `fibery_state` to update the entity workflow state as you progress."
+        )
+    else:
+        # State-change triggered: full issue-style prompt.
+        tag_line = f"## Fibery Tag: {github_tag}\n\n" if github_tag else ""
+        url_line = f"## Fibery Entity: {entity_url}\n\n" if entity_url else ""
+        prompt = (
+            f"Please work on the following issue:\n\n"
+            f"## Title: {title}\n\n"
+            f"{tag_line}"
+            f"{url_line}"
+            f"## Description:\n{description}\n\n"
+            f"Please analyze this issue and implement the necessary changes. "
+            f"When you're done, commit and push your changes. "
+            f"Use `fibery_comment` to post updates and `fibery_state` to update workflow state."
+        )
 
     content_blocks: list[dict[str, Any]] = [create_text_block(prompt)]
 
