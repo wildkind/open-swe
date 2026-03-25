@@ -1793,28 +1793,43 @@ async def fibery_webhook(
         logger.info("No effects in Fibery webhook payload (keys: %s)", list(payload.keys()))
         return {"status": "ignored", "reason": "No effects"}
 
-    # The database type comes from the top-level webhook config, not per-effect
-    database_type = payload.get("type", "")
     author_id = payload.get("authorId", "")
+
+    # Deduplicate: multiple effects can reference the same entity (e.g., add-comment + update-modification-date).
+    # We only need to process each entity once.
+    seen_entity_ids: set[str] = set()
 
     for effect in effects:
         entity_id = effect.get("id", "")
+        database_type = effect.get("type", "")
 
         if not entity_id or not database_type:
-            logger.debug("Skipping Fibery effect with missing id or type")
+            logger.debug("Skipping Fibery effect with missing id or type: %s", effect.get("effect"))
             continue
+
+        if entity_id in seen_entity_ids:
+            continue
+        seen_entity_ids.add(entity_id)
+
+        effect_type = effect.get("effect", "")
 
         # Detect the trigger type from the effect
         values = effect.get("values", {})
         values_before = effect.get("valuesBefore", {})
 
-        logger.info("Fibery effect for entity %s: values=%s, valuesBefore=%s",
-                     entity_id, list(values.keys()) if values else "none",
-                     list(values_before.keys()) if values_before else "none")
+        logger.info("Fibery effect for entity %s: effect_type=%s, values=%s",
+                     entity_id, effect_type,
+                     list(values.keys()) if values else "none")
 
-        # Check for workflow state change trigger
+        # Detect trigger type from the effect
+        comment_trigger = False
         state_changed = False
-        if values and values_before:
+
+        # Comment added: effect is "fibery.entity/add-collection-items" on "comments/comments"
+        if effect_type == "fibery.entity/add-collection-items" and effect.get("field") == "comments/comments":
+            comment_trigger = True
+        # State change: look for workflow/state in values vs valuesBefore
+        elif values and values_before:
             for key in values:
                 if "state" in key.lower() or "workflow" in key.lower():
                     old_val = values_before.get(key)
@@ -1822,9 +1837,6 @@ async def fibery_webhook(
                     if old_val != new_val:
                         state_changed = True
                         break
-
-        # If no state change, treat as a potential comment event
-        comment_trigger = not state_changed
 
         if comment_trigger:
             # For comment triggers, we need to verify @openswe is mentioned
