@@ -2080,16 +2080,12 @@ async def fibery_webhook(
                     author_id,
                 )
             else:
-                logger.info(
-                    "State change trigger for Fibery entity %s, scheduling processing",
+                # Only Backlog triggers agent work via state change.
+                # All other state transitions are ignored — implementation
+                # is triggered via @openswe comments, not state changes.
+                logger.debug(
+                    "Ignoring non-Backlog state change for Fibery entity %s",
                     entity_id,
-                )
-                background_tasks.add_task(
-                    process_fibery_entity,
-                    entity_id,
-                    database_type,
-                    "",  # no triggering comment for state changes
-                    author_id,
                 )
 
     return {"status": "accepted", "message": "Processing Fibery webhook effects"}
