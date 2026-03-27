@@ -4,6 +4,7 @@
 # Suppress deprecation warnings from langchain_core (e.g., Pydantic V1 on Python 3.14+)
 # ruff: noqa: E402
 import logging
+import os
 import shlex
 import warnings
 
@@ -60,6 +61,7 @@ from .tools import (
     slack_thread_reply,
     submit_pr_review,
     update_pr_review,
+    web_search,
 )
 from .utils.auth import resolve_github_token
 from .utils.model import make_model
@@ -251,6 +253,7 @@ def graph_loaded_for_execution(config: RunnableConfig) -> bool:
     )
 
 
+DEFAULT_LLM_MODEL_ID = "anthropic:claude-opus-4-6"
 DEFAULT_RECURSION_LIMIT = 1_000
 
 
@@ -417,7 +420,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
 
     logger.info("Returning agent with sandbox for thread %s", thread_id)
     return create_deep_agent(
-        model=make_model("google_genai:gemini-3.1-pro-preview", temperature=0, max_tokens=20_000, max_retries=3),
+        model=make_model(
+            os.environ.get("LLM_MODEL_ID", DEFAULT_LLM_MODEL_ID),
+            temperature=0,
+            max_tokens=20_000,
+        ),
         system_prompt=construct_system_prompt(
             repo_dir,
             linear_project_id=linear_project_id,
@@ -429,6 +436,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:  # noqa: PLR0915
             http_request,
             fetch_url,
             changie_new,
+            web_search,
             commit_and_open_pr,
             fibery_comment,
             fibery_create_entity,
