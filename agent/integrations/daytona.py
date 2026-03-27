@@ -4,7 +4,7 @@ from daytona import CreateSandboxFromSnapshotParams, Daytona, DaytonaConfig
 from langchain_daytona import DaytonaSandbox
 
 # TODO: Update this to include your specific sandbox configuration
-DAYTONA_SANDBOX_PARAMS = CreateSandboxFromSnapshotParams(snapshot="daytonaio/sandbox:0.6.0")
+DAYTONA_SANDBOX_PARAMS = CreateSandboxFromSnapshotParams(snapshot="daytona-medium")
 
 
 def create_daytona_sandbox(sandbox_id: str | None = None):
