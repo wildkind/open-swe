@@ -80,6 +80,8 @@ LANGGRAPH_URL = (
     or os.environ.get("LANGGRAPH_API_URL")
     or "http://localhost:2024"
 )
+if not LANGGRAPH_URL.startswith(("http://", "https://")):
+    LANGGRAPH_URL = f"https://{LANGGRAPH_URL}"
 
 _AGENT_VERSION_METADATA: dict[str, str] = (
     {"LANGSMITH_AGENT_VERSION": os.environ["LANGCHAIN_REVISION_ID"]}
