@@ -6,8 +6,8 @@ Open SWE is designed to be forked and customized for your org. The core agent is
 # agent/server.py — the key lines
 return create_deep_agent(
     model=make_model(os.environ.get("LLM_MODEL_ID", DEFAULT_LLM_MODEL_ID), temperature=0, max_tokens=20_000),
-    system_prompt=construct_system_prompt(repo_dir, ...),
-    tools=[http_request, fetch_url, commit_and_open_pr, linear_comment, slack_thread_reply],
+    system_prompt=construct_system_prompt(...),
+    tools=[http_request, fetch_url, list_repos, get_branch_name, commit_and_open_pr, linear_comment, slack_thread_reply],
     backend=sandbox_backend,
     middleware=[
         ToolErrorMiddleware(),
@@ -84,7 +84,7 @@ The factory must return an object implementing `SandboxBackendProtocol` from `de
 
 If none of the built-in providers fit, you can build your own. The agent accepts any backend that implements `SandboxBackendProtocol` from `deepagents`. The protocol requires:
 
-- **File operations**: `ls_info()`, `read()`, `write()`, `edit()`, `glob_info()`, `grep_raw()`
+- **File operations**: `ls()`, `read()`, `write()`, `edit()`, `glob()`, `grep()`
 - **Shell execution**: `execute(command, timeout=None) -> ExecuteResponse`
 - **Identity**: `id` property returning a unique sandbox identifier
 
@@ -111,7 +111,7 @@ class MySandbox(BaseSandbox):
         )
 ```
 
-See `agent/integrations/langsmith.py` (`LangSmithBackend` class) for a full reference implementation.
+See `deepagents.backends.LangSmithSandbox` and `agent/integrations/langsmith.py` for a full reference implementation.
 
 ---
 
@@ -384,6 +384,45 @@ The system prompt is assembled in `agent/prompt.py` from modular sections. You c
 | `COMMIT_PR_SECTION` | PR title/body format and commit conventions |
 | `CODE_REVIEW_GUIDELINES_SECTION` | How the agent reviews code changes |
 | `COMMUNICATION_SECTION` | Formatting and messaging guidelines |
+
+### Default prompt file
+
+Open SWE supports a `default_prompt.md` file for org-level instructions that apply to **every** agent run, regardless of which repository is being worked on. This is the recommended way to set default repository preferences, org conventions, and shared guidelines.
+
+The file is loaded at agent startup and injected into the system prompt between the task overview and repository setup sections.
+
+**Location:** [`default_prompt.md`](./default_prompt.md) in the project root.
+
+**Override:** Set the `DEFAULT_PROMPT_PATH` environment variable to use a different file:
+
+```bash
+DEFAULT_PROMPT_PATH="/path/to/my-org-prompt.md"
+```
+
+**Format:** Write plain markdown. The content is injected as-is under a `### Custom Instructions` heading in the system prompt. Example:
+
+```markdown
+# Default Prompt
+
+## Default Repository
+
+When no repository is specified, work on the **my-app** repository under **my-org**.
+
+## Organization Conventions
+
+- Use conventional commits: feat:, fix:, chore:
+- Always tag the requesting user when work is complete
+```
+
+**Loading order:** Default prompt → System prompt sections → AGENTS.md (per-repo). If the file is missing or empty, it is silently skipped — no error is raised.
+
+**When to use `default_prompt.md` vs `AGENTS.md`:**
+
+| | `default_prompt.md` | `AGENTS.md` |
+|---|---|---|
+| Scope | All tasks, all repos | Single repository |
+| Location | Open SWE project root | Target repo root |
+| Use for | Default repo, org conventions | Repo-specific coding standards |
 
 ### Using AGENTS.md
 

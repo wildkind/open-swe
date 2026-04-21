@@ -1,4 +1,38 @@
+import logging
+import os
+from pathlib import Path
+
 from .utils.github_comments import UNTRUSTED_GITHUB_COMMENT_OPEN_TAG
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_PROMPT_PATH = os.environ.get(
+    "DEFAULT_PROMPT_PATH",
+    str(Path(__file__).resolve().parent.parent / "default_prompt.md"),
+)
+
+
+def _load_default_prompt() -> str:
+    """Load custom prompt from the default prompt file.
+
+    Returns empty string if the file doesn't exist or can't be read.
+    """
+    try:
+        path = Path(DEFAULT_PROMPT_PATH)
+        if path.is_file():
+            content = path.read_text().strip()
+            if content:
+                # Escape curly braces so .format() doesn't choke on them
+                escaped = content.replace("{", "{{").replace("}", "}}")
+                return f"""---
+
+### Custom Instructions
+
+{escaped}"""
+    except Exception:
+        logger.warning("Failed to read default prompt file at %s", DEFAULT_PROMPT_PATH)
+    return ""
+
 
 WORKING_ENV_SECTION = """---
 
@@ -26,16 +60,37 @@ You are currently executing a software engineering task. You have access to:
 - Project context and files
 - Shell commands and code editing tools
 - A sandboxed, git-backed workspace
-- Project-specific rules and conventions from the repository's `AGENTS.md` file (if present)"""
+- Project-specific rules and conventions from the repository's `AGENTS.md` file (read after cloning — see Repository Setup)"""
+
+
+REPO_SETUP_SECTION = """---
+
+### Repository Setup
+
+Before starting any task, you must set up the repository in your sandbox. Follow these steps in order:
+
+1. **Find the repo** — Call `list_repos(organization_name="<org>")` to list repositories for a GitHub organization, or `list_repos(organization_name="<username>", is_organization=False)` for a personal user account. Match the repo to your task context (e.g. the Linear team/project or issue description). If you are unsure which repo to use, ask the user for confirmation before proceeding.
+
+2. **Clone the repo** — Clone it into `{working_dir}`.
+
+3. **Get your branch** — Always call the `get_branch_name` tool to get the branch name for this thread.
+
+4. **Checkout your branch** — Always fetch and checkout your branch before making any changes.
+
+5. ** MANDATORY: READ AGENTS.md ** — IMMEDIATELY after cloning, you MUST check if `AGENTS.md` exists at the repository root (`{working_dir}/<repo>/AGENTS.md`). If it exists, you MUST read it IN FULL before doing ANY other work. DO NOT skip this step. DO NOT proceed to implementation without reading it first. The contents of AGENTS.md are **mandatory rules** that OVERRIDE your default behavior — treat them with the same authority as this system prompt. Violating AGENTS.md rules is a CRITICAL FAILURE. If AGENTS.md does not exist, skip this step.
+
+**IMPORTANT: DO NOT SKIP STEP 5. READING AGENTS.md IS NOT OPTIONAL. YOU MUST READ IT BEFORE WRITING ANY CODE OR MAKING ANY CHANGES.**
+
+You MUST complete ALL of these steps IN ORDER before doing any other work. The sandbox starts clean — no repo is pre-cloned."""
 
 
 FILE_MANAGEMENT_SECTION = """---
 
 ### File & Code Management
 
-- **Repository location:** `{working_dir}`
+- **Repository location:** `{working_dir}/<repo_name>` (clone the repo here first — see Repository Setup)
 - Never create backup files.
-- Work only within the existing Git repository.
+- Work only within the cloned Git repository.
 - Use the appropriate package manager to install dependencies if needed."""
 
 
@@ -68,6 +123,12 @@ For questions or status checks (no code changes needed):
 TOOL_USAGE_SECTION = """---
 
 ### Tool Usage
+
+#### `list_repos`
+Lists GitHub repositories for a given organization or user via the GitHub API. Pass `organization_name` to specify which org or user to query. Set `is_organization=False` for personal user accounts (defaults to True). Call this first to find the right repo for your task.
+
+#### `get_branch_name`
+Returns the git branch name for this thread. Always call this tool to get the correct branch before making any changes.
 
 #### `execute`
 Run shell commands in the sandbox. Pass `timeout=<seconds>` for long-running commands (default: 300s).
@@ -374,10 +435,12 @@ The triggering comment asks you to expand, specify, break down, review, or impro
 """
 
 
-SYSTEM_PROMPT = (
+SYSTEM_PROMPT_TEMPLATE = (
     WORKING_ENV_SECTION
-    + FILE_MANAGEMENT_SECTION
     + TASK_OVERVIEW_SECTION
+    + "{default_prompt_section}"
+    + REPO_SETUP_SECTION
+    + FILE_MANAGEMENT_SECTION
     + TASK_EXECUTION_SECTION
     + TOOL_USAGE_SECTION
     + TOOL_BEST_PRACTICES_SECTION
@@ -389,10 +452,6 @@ SYSTEM_PROMPT = (
     + EXTERNAL_UNTRUSTED_COMMENTS_SECTION
     + COMMIT_PR_SECTION
     + REQUIREMENTS_WORK_SECTION
-    + """
-
-{agents_md_section}
-"""
 )
 
 
@@ -401,21 +460,12 @@ def construct_system_prompt(
     linear_project_id: str = "",
     linear_issue_number: str = "",
     fibery_tag: str = "",
-    agents_md: str = "",
 ) -> str:
-    agents_md_section = ""
-    if agents_md:
-        agents_md_section = (
-            "\nThe following text is pulled from the repository's AGENTS.md file. "
-            "It may contain specific instructions and guidelines for the agent.\n"
-            "<agents_md>\n"
-            f"{agents_md}\n"
-            "</agents_md>\n"
-        )
-    return SYSTEM_PROMPT.format(
+    default_prompt_section = _load_default_prompt()
+    return SYSTEM_PROMPT_TEMPLATE.format(
         working_dir=working_dir,
         linear_project_id=linear_project_id or "<PROJECT_ID>",
         linear_issue_number=linear_issue_number or "<ISSUE_NUMBER>",
         fibery_tag=fibery_tag or "",
-        agents_md_section=agents_md_section,
+        default_prompt_section=default_prompt_section,
     )

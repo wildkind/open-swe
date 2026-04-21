@@ -19,22 +19,8 @@ def _run_git(
     sandbox_backend: SandboxBackendProtocol, repo_dir: str, command: str
 ) -> ExecuteResponse:
     """Run a git command in the sandbox repo directory."""
-    return sandbox_backend.execute(f"cd {repo_dir} && {command}")
-
-
-def is_valid_git_repo(sandbox_backend: SandboxBackendProtocol, repo_dir: str) -> bool:
-    """Check if directory is a valid git repository."""
-    git_dir = f"{repo_dir}/.git"
-    safe_git_dir = shlex.quote(git_dir)
-    result = sandbox_backend.execute(f"test -d {safe_git_dir} && echo exists")
-    return result.exit_code == 0 and "exists" in result.output
-
-
-def remove_directory(sandbox_backend: SandboxBackendProtocol, repo_dir: str) -> bool:
-    """Remove a directory and all its contents."""
     safe_repo_dir = shlex.quote(repo_dir)
-    result = sandbox_backend.execute(f"rm -rf {safe_repo_dir}")
-    return result.exit_code == 0
+    return sandbox_backend.execute(f"cd {safe_repo_dir} && {command}")
 
 
 def git_has_uncommitted_changes(sandbox_backend: SandboxBackendProtocol, repo_dir: str) -> bool:
@@ -79,6 +65,14 @@ def git_checkout_branch(
     return fallback.exit_code == 0
 
 
+def git_checkout_existing_branch(
+    sandbox_backend: SandboxBackendProtocol, repo_dir: str, branch: str
+) -> ExecuteResponse:
+    """Checkout an existing branch without creating or resetting it."""
+    safe_branch = shlex.quote(branch)
+    return _run_git(sandbox_backend, repo_dir, f"git checkout {safe_branch}")
+
+
 def git_config_user(
     sandbox_backend: SandboxBackendProtocol,
     repo_dir: str,
@@ -113,49 +107,18 @@ def git_get_remote_url(sandbox_backend: SandboxBackendProtocol, repo_dir: str) -
     return result.output.strip()
 
 
-_CRED_FILE_PATH = "/tmp/.git-credentials"
-
-
-def setup_git_credentials(sandbox_backend: SandboxBackendProtocol, github_token: str) -> None:
-    """Write GitHub credentials to a temporary file using the sandbox write API.
-
-    The write API sends content in the HTTP body (not via a shell command),
-    so the token never appears in shell history or process listings.
-    """
-    sandbox_backend.write(_CRED_FILE_PATH, f"https://git:{github_token}@github.com\n")
-    sandbox_backend.execute(f"chmod 600 {_CRED_FILE_PATH}")
-
-
-def cleanup_git_credentials(sandbox_backend: SandboxBackendProtocol) -> None:
-    """Remove the temporary credentials file."""
-    sandbox_backend.execute(f"rm -f {_CRED_FILE_PATH}")
-
-
-def _git_with_credentials(
-    sandbox_backend: SandboxBackendProtocol,
-    repo_dir: str,
-    command: str,
-) -> ExecuteResponse:
-    """Run a git command using the temporary credential file."""
-    cred_helper = shlex.quote(f"store --file={_CRED_FILE_PATH}")
-    return _run_git(sandbox_backend, repo_dir, f"git -c credential.helper={cred_helper} {command}")
-
-
 def git_push(
     sandbox_backend: SandboxBackendProtocol,
     repo_dir: str,
     branch: str,
-    github_token: str | None = None,
 ) -> ExecuteResponse:
-    """Push the branch to origin, using a token if needed."""
+    """Push the branch to origin.
+
+    Authentication is handled by the sandbox proxy (configured at sandbox creation
+    time via the LangSmith proxy-config API), so no token is needed here.
+    """
     safe_branch = shlex.quote(branch)
-    if not github_token:
-        return _run_git(sandbox_backend, repo_dir, f"git push origin {safe_branch}")
-    setup_git_credentials(sandbox_backend, github_token)
-    try:
-        return _git_with_credentials(sandbox_backend, repo_dir, f"push origin {safe_branch}")
-    finally:
-        cleanup_git_credentials(sandbox_backend)
+    return _run_git(sandbox_backend, repo_dir, f"git push origin {safe_branch}")
 
 
 async def create_github_pr(
