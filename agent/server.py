@@ -79,42 +79,72 @@ SANDBOX_POLL_INTERVAL = 1.0
 from .utils.sandbox_state import SANDBOX_BACKENDS, get_sandbox_id_from_metadata
 
 
-async def _create_sandbox_with_proxy() -> SandboxBackendProtocol:
-    """Create a new sandbox with GitHub proxy auth configured.
+_CRED_FILE_PATH = "/tmp/.git-credentials"  # noqa: S108
 
-    Uses create_sandbox (generic factory) so non-langsmith providers still work.
-    For langsmith sandboxes, configures the proxy with the installation token.
+
+async def _write_sandbox_git_credentials(
+    sandbox_backend: SandboxBackendProtocol, token: str
+) -> None:
+    """Write GitHub credentials into the sandbox for providers without a proxy.
+
+    LangSmith sandboxes use `_configure_github_proxy` to inject auth at the
+    network layer. Other providers (Daytona, etc.) need the token on disk so
+    `git clone https://github.com/...` works inside the sandbox.
+
+    The write API sends content via HTTP body, so the token never hits shell
+    history. A global `credential.helper` is then configured to use the file.
     """
-    sandbox_backend = await asyncio.to_thread(create_sandbox)
+    # `write` errors if the file exists — remove first so refresh works.
+    await asyncio.to_thread(sandbox_backend.execute, f"rm -f {_CRED_FILE_PATH}")
+    await asyncio.to_thread(
+        sandbox_backend.write,
+        _CRED_FILE_PATH,
+        f"https://git:{token}@github.com\n",
+    )
+    await asyncio.to_thread(
+        sandbox_backend.execute,
+        f"chmod 600 {_CRED_FILE_PATH} && "
+        f"git config --global credential.helper 'store --file={_CRED_FILE_PATH}'",
+    )
 
-    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
-    if sandbox_type == "langsmith":
-        installation_token = await get_github_app_installation_token()
-        if not installation_token:
-            msg = "Cannot configure proxy: GitHub App installation token is unavailable"
+
+async def _configure_sandbox_github_auth(
+    sandbox_backend: SandboxBackendProtocol, *, required: bool
+) -> None:
+    """Set up GitHub auth inside the sandbox using the installation token.
+
+    For LangSmith: configures the network proxy.
+    For other providers: writes credentials into the sandbox filesystem.
+
+    If `required` is True, raise when no installation token is available.
+    """
+    installation_token = await get_github_app_installation_token()
+    if not installation_token:
+        msg = "GitHub App installation token is unavailable"
+        if required:
             logger.error(msg)
             raise ValueError(msg)
-        await asyncio.to_thread(_configure_github_proxy, sandbox_backend.id, installation_token)
+        logger.warning("Skipping GitHub auth setup for sandbox %s: %s", sandbox_backend.id, msg)
+        return
 
+    if os.getenv("SANDBOX_TYPE", "langsmith") == "langsmith":
+        await asyncio.to_thread(_configure_github_proxy, sandbox_backend.id, installation_token)
+    else:
+        await _write_sandbox_git_credentials(sandbox_backend, installation_token)
+
+
+async def _create_sandbox_with_proxy() -> SandboxBackendProtocol:
+    """Create a new sandbox with GitHub auth configured."""
+    sandbox_backend = await asyncio.to_thread(create_sandbox)
+    await _configure_sandbox_github_auth(sandbox_backend, required=True)
     return sandbox_backend
 
 
 async def _refresh_github_proxy(
     sandbox_backend: SandboxBackendProtocol,
 ) -> None:
-    """Refresh GitHub proxy credentials for reused LangSmith sandboxes."""
-    if os.getenv("SANDBOX_TYPE", "langsmith") != "langsmith":
-        return
-
-    installation_token = await get_github_app_installation_token()
-    if not installation_token:
-        logger.warning(
-            "Skipping GitHub proxy refresh for sandbox %s: installation token unavailable",
-            sandbox_backend.id,
-        )
-        return
-
-    await asyncio.to_thread(_configure_github_proxy, sandbox_backend.id, installation_token)
+    """Refresh GitHub auth for a reused sandbox (proxy or credential file)."""
+    await _configure_sandbox_github_auth(sandbox_backend, required=False)
 
 
 async def _recreate_sandbox(thread_id: str) -> SandboxBackendProtocol:
