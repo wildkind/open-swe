@@ -125,7 +125,7 @@ def commit_and_open_pr(
         if not thread_id:
             return {"success": False, "error": "Missing thread_id in config", "pr_url": None}
 
-        repo_config = configurable.get("repo", {})
+        repo_config = configurable.get("repo") or config.get("metadata", {}).get("repo") or {}
         repo_owner = repo_config.get("owner")
         repo_name = repo_config.get("name")
         if not repo_owner or not repo_name:

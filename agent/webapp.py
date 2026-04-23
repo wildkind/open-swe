@@ -12,22 +12,28 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from langchain_core.messages.content import create_text_block
 from langgraph_sdk import get_client
-from langgraph_sdk.client import LangGraphClient
 
 from .utils.auth import (
     is_bot_token_only_mode,
     persist_encrypted_github_token,
     resolve_github_token_from_email,
 )
+from .utils.comments import get_recent_comments
 from .utils.fibery import (
     create_comment as fibery_create_comment,
+)
+from .utils.fibery import (
     fetch_document as fibery_fetch_document,
-    fetch_entity as fibery_fetch_entity,
+)
+from .utils.fibery import (
     fetch_entity_comments as fibery_fetch_entity_comments,
+)
+from .utils.fibery import (
     fetch_entity_repositories as fibery_fetch_entity_repositories,
+)
+from .utils.fibery import (
     fetch_user_email as fibery_fetch_user_email,
 )
-from .utils.comments import get_recent_comments
 from .utils.github_app import get_github_app_installation_token
 from .utils.github_comments import (
     OPEN_SWE_TAGS,
@@ -46,7 +52,11 @@ from .utils.github_user_email_map import GITHUB_USER_EMAIL_MAP
 from .utils.linear import post_linear_trace_comment
 from .utils.linear_team_repo_map import LINEAR_TEAM_TO_REPO
 from .utils.multimodal import dedupe_urls, extract_image_urls, fetch_image_block
-from .utils.repo import extract_repo_from_text
+from .utils.repo import (
+    extract_repo_from_text,
+    resolve_repo_config,
+    upsert_thread_repo_metadata,
+)
 from .utils.slack import (
     add_slack_reaction,
     fetch_slack_thread_messages,
@@ -278,27 +288,6 @@ def generate_thread_id_from_slack_thread(channel_id: str, thread_id: str) -> str
     return str(uuid.UUID(hex=md5_hex))
 
 
-def _extract_repo_config_from_thread(thread: dict[str, Any]) -> dict[str, str] | None:
-    """Extract repo config from persisted thread data."""
-    metadata = thread.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-
-    repo = metadata.get("repo")
-    if isinstance(repo, dict):
-        owner = repo.get("owner")
-        name = repo.get("name")
-        if isinstance(owner, str) and owner and isinstance(name, str) and name:
-            return {"owner": owner, "name": name}
-
-    owner = metadata.get("repo_owner")
-    name = metadata.get("repo_name")
-    if isinstance(owner, str) and owner and isinstance(name, str) and name:
-        return {"owner": owner, "name": name}
-
-    return None
-
-
 def _is_not_found_error(exc: Exception) -> bool:
     """Best-effort check for LangGraph 404 errors."""
     return getattr(exc, "status_code", None) == 404
@@ -314,32 +303,6 @@ def _is_repo_org_allowed(repo_config: dict[str, str]) -> bool:
         return True
     owner = repo_config.get("owner", "").lower()
     return owner in ALLOWED_GITHUB_ORGS
-
-
-async def _upsert_slack_thread_repo_metadata(
-    thread_id: str, repo_config: dict[str, str], langgraph_client: LangGraphClient
-) -> None:
-    """Persist the selected repo config on the thread metadata."""
-    try:
-        await langgraph_client.threads.update(thread_id=thread_id, metadata={"repo": repo_config})
-    except Exception as exc:  # noqa: BLE001
-        if _is_not_found_error(exc):
-            try:
-                await langgraph_client.threads.create(
-                    thread_id=thread_id,
-                    if_exists="do_nothing",
-                    metadata={"repo": repo_config},
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Failed to create Slack thread %s while persisting repo metadata",
-                    thread_id,
-                )
-            return
-        logger.exception(
-            "Failed to persist Slack thread repo metadata for thread %s",
-            thread_id,
-        )
 
 
 async def check_if_using_repo_msg_sent(
@@ -359,20 +322,9 @@ async def get_slack_repo_config(message: str, channel_id: str, thread_ts: str) -
     thread_id = generate_thread_id_from_slack_thread(channel_id, thread_ts)
     langgraph_client = get_client(url=LANGGRAPH_URL)
 
-    repo_config = extract_repo_from_text(message, default_owner=default_owner)
-
-    if not repo_config:
-        try:
-            thread = await langgraph_client.threads.get(thread_id)
-            thread_repo_config = _extract_repo_config_from_thread(thread)
-            if thread_repo_config:
-                repo_config = thread_repo_config
-        except Exception as exc:  # noqa: BLE001
-            if not _is_not_found_error(exc):
-                logger.exception(
-                    "Failed to fetch Slack thread %s for repo resolution",
-                    thread_id,
-                )
+    repo_config = await resolve_repo_config(
+        message, thread_id, langgraph_client, default_owner=default_owner
+    )
 
     if not repo_config:
         repo_config = {"owner": default_owner, "name": default_name}
@@ -823,7 +775,7 @@ async def process_slack_mention(event_data: dict[str, Any], repo_config: dict[st
     }
 
     langgraph_client = get_client(url=LANGGRAPH_URL)
-    await _upsert_slack_thread_repo_metadata(thread_id, repo_config, langgraph_client)
+    await upsert_thread_repo_metadata(thread_id, repo_config, langgraph_client)
 
     thread_active = await is_thread_active(thread_id)
     if thread_active:
@@ -1791,12 +1743,27 @@ def _is_state_backlog(state_value: Any) -> bool:
     return False
 
 
-_SPEC_KEYWORDS = frozenset({
-    "flesh out", "break down", "break this down", "requirements", "spec",
-    "acceptance criteria", "review the spec", "too vague", "detail",
-    "sub-tasks", "subtasks", "sub tasks", "flesh this out", "specify",
-    "add criteria", "identify gaps", "refine the description",
-})
+_SPEC_KEYWORDS = frozenset(
+    {
+        "flesh out",
+        "break down",
+        "break this down",
+        "requirements",
+        "spec",
+        "acceptance criteria",
+        "review the spec",
+        "too vague",
+        "detail",
+        "sub-tasks",
+        "subtasks",
+        "sub tasks",
+        "flesh this out",
+        "specify",
+        "add criteria",
+        "identify gaps",
+        "refine the description",
+    }
+)
 
 
 def _is_spec_request(comment: str) -> bool:
@@ -1835,8 +1802,7 @@ async def process_fibery_backlog_spec(
     description = full_entity.get("description", "")
     background_brief = full_entity.get("background_brief", "")
     has_content = (
-        description.strip() not in ("", "No description")
-        or background_brief.strip() != ""
+        description.strip() not in ("", "No description") or background_brief.strip() != ""
     )
     repo_configs = full_entity.get("repo_configs", [])
 
@@ -1879,11 +1845,11 @@ async def process_fibery_backlog_spec(
         + f"\n\n## Entity Description\n{description}\n\n"
         + (f"## Background & Brief\n{background_brief}\n\n" if background_brief else "")
         + "Please flesh out the requirements for this task. "
-        "Use `fibery_update_description` to write the spec (use `field=\"background_brief\"` for tech tasks), "
+        'Use `fibery_update_description` to write the spec (use `field="background_brief"` for tech tasks), '
         "`fibery_create_entity` to create sub-tasks if appropriate, "
         "and `fibery_comment` to post a summary of what you added. "
         "After completing spec work, use `fibery_update_field` with "
-        "field=\"Tools/AI Specced\" and value=\"true\" to mark the task as specced."
+        'field="Tools/AI Specced" and value="true" to mark the task as specced.'
     )
 
     content_blocks: list[dict[str, Any]] = [create_text_block(prompt)]
@@ -1920,7 +1886,8 @@ async def process_fibery_backlog_spec(
     if thread_active:
         logger.warning(
             "Skipping Backlog spec for %s — thread %s is already active",
-            entity_id, thread_id,
+            entity_id,
+            thread_id,
         )
         return
 
@@ -1970,8 +1937,11 @@ async def process_fibery_entity(
     if not user_email and full_entity.get("lead_id"):
         user_email = await fibery_fetch_user_email(full_entity["lead_id"])
     if not user_email:
-        logger.warning("Could not resolve email for Fibery user (actor=%s, lead=%s)",
-                        actor_user_id, full_entity.get("lead_id"))
+        logger.warning(
+            "Could not resolve email for Fibery user (actor=%s, lead=%s)",
+            actor_user_id,
+            full_entity.get("lead_id"),
+        )
 
     title = full_entity["title"]
     description = full_entity["description"]
@@ -2019,7 +1989,10 @@ async def process_fibery_entity(
     if not repo_configs:
         if is_spec:
             # Spec work can proceed without a repo — run once with no repo
-            logger.info("No repos linked, but spec request — proceeding without repo for entity %s", entity_id)
+            logger.info(
+                "No repos linked, but spec request — proceeding without repo for entity %s",
+                entity_id,
+            )
             repo_configs = [None]
         else:
             logger.error("No repositories linked to Fibery entity %s", entity_id)
@@ -2034,7 +2007,9 @@ async def process_fibery_entity(
     # For spec requests on multi-repo entities, only run once to avoid
     # concurrent writes to the same description document.
     if is_spec and len(repo_configs) > 1:
-        logger.info("Spec request on multi-repo entity — using first repo only for entity %s", entity_id)
+        logger.info(
+            "Spec request on multi-repo entity — using first repo only for entity %s", entity_id
+        )
         repo_configs = repo_configs[:1]
 
     for repo_config in repo_configs:
@@ -2091,8 +2066,12 @@ async def process_fibery_entity(
                 config={"configurable": configurable, "metadata": _AGENT_VERSION_METADATA},
                 if_not_exists="create",
             )
-            logger.info("LangGraph run created for thread %s (repo: %s/%s)",
-                        thread_id, repo_config["owner"], repo_config["name"])
+            logger.info(
+                "LangGraph run created for thread %s (repo: %s/%s)",
+                thread_id,
+                repo_config["owner"],
+                repo_config["name"],
+            )
 
 
 @app.get("/webhooks/fibery")
@@ -2102,9 +2081,7 @@ async def fibery_webhook_verify() -> dict[str, str]:
 
 
 @app.post("/webhooks/fibery")
-async def fibery_webhook(
-    request: Request, background_tasks: BackgroundTasks
-) -> dict[str, str]:
+async def fibery_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
     """Handle Fibery webhooks.
 
     Triggers a new LangGraph run when:
@@ -2163,7 +2140,10 @@ async def fibery_webhook(
         new_state_value = None
 
         # Comment added: effect is "fibery.entity/add-collection-items" on "comments/comments"
-        if effect_type == "fibery.entity/add-collection-items" and effect.get("field") == "comments/comments":
+        if (
+            effect_type == "fibery.entity/add-collection-items"
+            and effect.get("field") == "comments/comments"
+        ):
             comment_trigger = True
         # State change: look for workflow/state in values vs valuesBefore
         elif values and values_before:

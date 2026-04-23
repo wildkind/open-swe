@@ -53,6 +53,29 @@ class TestExtractRepoFromText:
         result = extract_repo_from_text("repo:my-org/my-repo/")
         assert result == {"owner": "my-org", "name": "my-repo"}
 
+    def test_bare_owner_repo_match(self) -> None:
+        result = extract_repo_from_text("fix the bug in wildkind-uk/medusa please")
+        assert result == {"owner": "wildkind-uk", "name": "medusa"}
+
+    def test_bare_owner_repo_rejects_path_prefix(self) -> None:
+        # docs/, src/, tests/ etc. should not be treated as repos
+        assert extract_repo_from_text("edit docs/setup.md") is None
+        assert extract_repo_from_text("rewrite src/main.py") is None
+        assert extract_repo_from_text("update tests/test_foo.py") is None
+
+    def test_bare_owner_repo_rejects_numeric_path(self) -> None:
+        # digit-only segments aren't valid GitHub owners/repos
+        assert extract_repo_from_text("date 2026/04 entries") is None
+        assert extract_repo_from_text("see issues/123") is None
+
+    def test_explicit_repo_beats_bare_match(self) -> None:
+        result = extract_repo_from_text("also mention bar/baz but use repo:org/name")
+        assert result == {"owner": "org", "name": "name"}
+
+    def test_github_url_beats_bare_match(self) -> None:
+        result = extract_repo_from_text("bar/baz https://github.com/real-org/real-repo")
+        assert result == {"owner": "real-org", "name": "real-repo"}
+
 
 class TestLinearWebhookRepoOverride:
     """Test that the Linear webhook handler checks comment body for repo config first."""
