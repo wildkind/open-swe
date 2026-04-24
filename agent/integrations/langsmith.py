@@ -8,12 +8,17 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from deepagents.backends import LangSmithSandbox
 from deepagents.backends.protocol import SandboxBackendProtocol
-from langsmith.sandbox import SandboxClient, SandboxTemplate
+from langsmith.sandbox import SandboxClient
+
+if TYPE_CHECKING:
+    # `SandboxTemplate` is a type-only reference; importing at runtime breaks
+    # on LangGraph Platform images whose bundled langsmith has removed it.
+    from langsmith.sandbox import SandboxTemplate
 
 logger = logging.getLogger(__name__)
 

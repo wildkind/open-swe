@@ -18,7 +18,7 @@ dependencies = [
     "markdownify>=1.2.2",
     "langchain-anthropic>1.1.0",
     "langgraph-cli[inmem]>=0.4.21",
-    "langsmith>=0.7.32",
+    "langsmith>=0.7.34",
     "langchain-openai==1.1.13",
     "langchain-daytona>=0.0.5",
     "langchain-modal>=0.0.3",
