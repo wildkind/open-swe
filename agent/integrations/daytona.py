@@ -1,7 +1,9 @@
 import logging
 import os
+import time
 
 from daytona import CreateSandboxFromSnapshotParams, Daytona, DaytonaConfig, DaytonaError
+from daytona.common.errors import DaytonaNotFoundError, DaytonaRateLimitError
 from daytona_api_client.models import SandboxState
 from langchain_daytona import DaytonaSandbox
 
@@ -9,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 # TODO: Update this to include your specific sandbox configuration
 DAYTONA_SANDBOX_PARAMS = CreateSandboxFromSnapshotParams(snapshot="daytona-medium")
+
+_CREATE_MAX_ATTEMPTS = 3
+_CREATE_BACKOFF_BASE_SECONDS = 2.0
 
 _TRANSITIONAL_STATES = (
     SandboxState.STARTING,
@@ -31,6 +36,45 @@ def _log_daytona_error(context: str, err: DaytonaError) -> None:
         str(err),
         err.headers,
     )
+
+
+def _is_retryable_create_error(err: DaytonaError) -> bool:
+    """Return True for transient errors worth retrying on sandbox creation.
+
+    `status_code is None` means the request never got an HTTP response — i.e. a
+    network/transport failure (read timeout, connection reset). 5xx and 429 are
+    server-side hiccups that usually resolve on retry. 4xx (other than 429) and
+    not-found errors indicate a real problem and should not be retried.
+    """
+    if isinstance(err, DaytonaNotFoundError):
+        return False
+    if isinstance(err, DaytonaRateLimitError):
+        return True
+    if err.status_code is None:
+        return True
+    return err.status_code >= 500
+
+
+def _create_sandbox_with_retry(daytona: Daytona):
+    """Call daytona.create with retries on transient errors."""
+    for attempt in range(1, _CREATE_MAX_ATTEMPTS + 1):
+        try:
+            return daytona.create(params=DAYTONA_SANDBOX_PARAMS)
+        except DaytonaError as err:
+            if attempt == _CREATE_MAX_ATTEMPTS or not _is_retryable_create_error(err):
+                _log_daytona_error("create sandbox", err)
+                raise
+            backoff = _CREATE_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                "Transient Daytona error on create attempt %d/%d (status=%s): %s. "
+                "Retrying in %.1fs",
+                attempt,
+                _CREATE_MAX_ATTEMPTS,
+                err.status_code,
+                err,
+                backoff,
+            )
+            time.sleep(backoff)
 
 
 def _resume_sandbox(sandbox, sandbox_id: str) -> None:
@@ -78,10 +122,6 @@ def create_daytona_sandbox(sandbox_id: str | None = None):
             _log_daytona_error(f"resume sandbox {sandbox_id}", err)
             raise
     else:
-        try:
-            sandbox = daytona.create(params=DAYTONA_SANDBOX_PARAMS)
-        except DaytonaError as err:
-            _log_daytona_error("create sandbox", err)
-            raise
+        sandbox = _create_sandbox_with_retry(daytona)
 
     return DaytonaSandbox(sandbox=sandbox)
