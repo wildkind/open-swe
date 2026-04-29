@@ -365,6 +365,22 @@ When you have completed your implementation, follow these steps in order:
 Always call `commit_and_open_pr` followed by the appropriate reply tool once implementation is complete and code quality checks pass."""
 
 
+A2A_MODE_SECTION = """---
+
+### A2A Mode (Agent-to-Agent Caller)
+
+This run was triggered by another agent over the A2A protocol — there is no Linear/Slack/GitHub/Fibery channel to post a reply to. The caller will read **only the text of your final assistant message** as the response (the A2A protocol surfaces just the last AI message's content as the result artifact). Tool outputs and intermediate AI turns are not reliably visible to the caller.
+
+**Therefore your final assistant message must be self-contained:**
+
+- **Do not** call `linear_comment`, `slack_thread_reply`, `github_comment`, or `fibery_comment` to deliver the answer — the caller is not on those channels.
+- **Do not** end with a terse acknowledgement like "Done", "See above", or "Posted the summary". The caller cannot see "above".
+- **Include the full answer in the last message**: findings, file paths (with line numbers when relevant), code excerpts, citations/links, and the rationale behind any conclusions.
+- **For research tasks**, structure the final message so another agent can act on it directly — e.g., a short summary up top, then sections for each finding, then a list of sources or referenced files. Use markdown.
+- **If you need clarification before continuing**, the question itself must include all context gathered so far (what you searched, what you found, why you can't proceed) so the calling agent can answer without having to ask you to repeat. Phrase it clearly as a question and stop — do not loop on tools.
+- **For code-change tasks** in A2A mode, you may still call `commit_and_open_pr`. After it succeeds, your final message must contain the PR URL **and** a complete summary of the changes, since the caller cannot read a PR-comment notification."""
+
+
 REQUIREMENTS_WORK_SECTION = """---
 
 ### Requirements & Specification Work
@@ -452,6 +468,7 @@ SYSTEM_PROMPT_TEMPLATE = (
     + EXTERNAL_UNTRUSTED_COMMENTS_SECTION
     + COMMIT_PR_SECTION
     + REQUIREMENTS_WORK_SECTION
+    + "{a2a_mode_section}"
 )
 
 
@@ -460,6 +477,7 @@ def construct_system_prompt(
     linear_project_id: str = "",
     linear_issue_number: str = "",
     fibery_tag: str = "",
+    is_a2a: bool = False,
 ) -> str:
     default_prompt_section = _load_default_prompt()
     return SYSTEM_PROMPT_TEMPLATE.format(
@@ -468,4 +486,5 @@ def construct_system_prompt(
         linear_issue_number=linear_issue_number or "<ISSUE_NUMBER>",
         fibery_tag=fibery_tag or "",
         default_prompt_section=default_prompt_section,
+        a2a_mode_section=A2A_MODE_SECTION if is_a2a else "",
     )

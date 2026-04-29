@@ -32,6 +32,7 @@ from .middleware import (
     ensure_no_empty_msg,
     open_pr_if_needed,
     resolve_repo_from_messages,
+    resolve_repo_from_sandbox,
 )
 from .prompt import construct_system_prompt
 from .tools import (
@@ -327,9 +328,13 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     fibery_entity = config["configurable"].get("fibery_entity", {})
     fibery_tag = fibery_entity.get("github_tag", "")
 
+    # Webhook handlers (linear/slack/github/fibery) always set `source`;
+    # A2A goes through langgraph_api directly and leaves it unset.
+    is_a2a = not config["configurable"].get("source")
+
     work_dir = await aresolve_sandbox_work_dir(sandbox_backend)
 
-    logger.info("Returning agent with sandbox for thread %s", thread_id)
+    logger.info("Returning agent with sandbox for thread %s (a2a=%s)", thread_id, is_a2a)
     return create_deep_agent(
         model=make_model(
             os.environ.get("LLM_MODEL_ID", DEFAULT_LLM_MODEL_ID),
@@ -340,6 +345,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             linear_project_id=linear_project_id,
             linear_issue_number=linear_issue_number,
             fibery_tag=fibery_tag,
+            is_a2a=is_a2a,
         ),
         tools=[
             http_request,
@@ -376,6 +382,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         middleware=[
             ToolErrorMiddleware(),
             resolve_repo_from_messages,
+            resolve_repo_from_sandbox,
             check_message_queue_before_model,
             ensure_no_empty_msg,
             open_pr_if_needed,
