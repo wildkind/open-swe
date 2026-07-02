@@ -24,7 +24,6 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 from langgraph_sdk import get_client
 
-from ..utils.github import git_get_remote_url
 from ..utils.repo import (
     extract_repo_from_text,
     resolve_repo_config,
@@ -34,6 +33,16 @@ from ..utils.sandbox_paths import resolve_sandbox_work_dir
 from ..utils.sandbox_state import SANDBOX_BACKENDS
 
 logger = logging.getLogger(__name__)
+
+
+def _git_get_remote_url(sandbox_backend: Any, repo_dir: str) -> str | None:
+    result = sandbox_backend.execute(
+        f"git -C {shlex.quote(repo_dir)} remote get-url origin",
+        timeout=30,
+    )
+    if result.exit_code != 0:
+        return None
+    return result.output.strip() or None
 
 
 def _flatten_message_text(messages: list[Any]) -> str:
@@ -123,7 +132,7 @@ def _discover_repo_from_sandbox(sandbox_backend: Any) -> dict[str, str] | None:
     candidates: list[dict[str, str]] = []
     for git_dir in git_dirs:
         repo_dir = posixpath.dirname(git_dir)
-        url = git_get_remote_url(sandbox_backend, repo_dir)
+        url = _git_get_remote_url(sandbox_backend, repo_dir)
         if not url:
             continue
         # ``extract_repo_from_text`` matches ``github.com/owner/name`` but
