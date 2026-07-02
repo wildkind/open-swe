@@ -11,9 +11,26 @@ from typing import Any
 
 import httpx
 
-from .github_user_email_map import GITHUB_USER_EMAIL_MAP
+from .github_token import GitHubAuthError
+from .http import DEFAULT_HTTP_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "GitHubAuthError",
+    "OPEN_SWE_TAGS",
+    "build_pr_prompt",
+    "extract_pr_context",
+    "fetch_issue_comments",
+    "fetch_pr_branch",
+    "fetch_pr_comments_since_last_tag",
+    "format_github_comment_body_for_prompt",
+    "get_thread_id_from_branch",
+    "post_github_comment",
+    "react_to_github_comment",
+    "sanitize_github_comment_body",
+    "verify_github_signature",
+]
 
 OPEN_SWE_TAGS = ("@openswe", "@open-swe", "@openswe-dev")
 UNTRUSTED_GITHUB_COMMENT_OPEN_TAG = "<dangerous-external-untrusted-users-comment>"
@@ -27,6 +44,8 @@ _REACTION_ENDPOINTS: dict[str, str] = {
     "pull_request_review_comment": "https://api.github.com/repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions",
     "pull_request_review": "https://api.github.com/repos/{owner}/{repo}/pulls/{pull_number}/reviews/{comment_id}/reactions",
 }
+
+PAGINATED_MAX_PAGES = 50
 
 
 def verify_github_signature(body: bytes, signature: str, *, secret: str) -> bool:
@@ -46,6 +65,17 @@ def verify_github_signature(body: bytes, signature: str, *, secret: str) -> bool
 
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+def derive_pr_state(*, state: str | None, merged: bool, draft: bool) -> str:
+    """Map GitHub PR fields to the dashboard's pr_state vocabulary."""
+    if merged:
+        return "merged"
+    if state == "closed":
+        return "closed"
+    if draft:
+        return "draft"
+    return "open"
 
 
 def get_thread_id_from_branch(branch_name: str) -> str | None:
@@ -74,7 +104,9 @@ def sanitize_github_comment_body(body: str) -> str:
 def format_github_comment_body_for_prompt(author: str, body: str) -> str:
     """Format a GitHub comment body for prompt inclusion."""
     sanitized_body = sanitize_github_comment_body(body)
-    if author in GITHUB_USER_EMAIL_MAP:
+    from ..dashboard.user_mappings import is_login_mapped
+
+    if is_login_mapped(author):
         return sanitized_body
 
     return (
@@ -104,7 +136,7 @@ async def react_to_github_comment(
         owner=owner, repo=repo, comment_id=comment_id, pull_number=pull_number
     )
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         try:
             response = await http_client.post(
                 url,
@@ -115,8 +147,12 @@ async def react_to_github_comment(
                 },
                 json={"content": "eyes"},
             )
+            if response.status_code == 401:
+                raise GitHubAuthError(f"GitHub returned 401 reacting to comment {comment_id}")
             # 200 = already reacted, 201 = just created
             return response.status_code in (200, 201)
+        except GitHubAuthError:
+            raise
         except Exception:
             logger.exception("Failed to react to GitHub comment %s", comment_id)
             return False
@@ -135,18 +171,24 @@ async def _react_via_graphql(node_id: str | None, *, token: str) -> bool:
     }
     }
     """
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         try:
             response = await http_client.post(
                 "https://api.github.com/graphql",
                 headers={"Authorization": f"Bearer {token}"},
                 json={"query": query, "variables": {"subjectId": node_id}},
             )
+            if response.status_code == 401:
+                raise GitHubAuthError(
+                    f"GitHub returned 401 reacting via GraphQL for node {node_id}"
+                )
             data = response.json()
             if "errors" in data:
                 logger.warning("GraphQL reaction errors: %s", data["errors"])
                 return False
             return True
+        except GitHubAuthError:
+            raise
         except Exception:
             logger.exception("Failed to react via GraphQL for node_id %s", node_id)
             return False
@@ -163,7 +205,7 @@ async def post_github_comment(
     owner = repo_config.get("owner", "")
     repo = repo_config.get("name", "")
     url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
         try:
             response = await client.post(
                 url,
@@ -193,7 +235,7 @@ async def fetch_issue_comments(
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         comments = await _fetch_paginated(
             http_client,
             f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -242,7 +284,7 @@ async def fetch_pr_comments_since_last_tag(
 
     all_comments: list[dict[str, Any]] = []
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         pr_comments, review_comments, reviews = await asyncio.gather(
             _fetch_paginated(
                 http_client,
@@ -343,7 +385,7 @@ async def fetch_pr_branch(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        async with httpx.AsyncClient() as http_client:
+        async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
             response = await http_client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
                 headers=headers,
@@ -412,11 +454,11 @@ def build_pr_prompt(
         f"## Comments:\n{comments_text}\n\n"
         "If code changes are needed:\n"
         "1. Make the changes in the sandbox\n"
-        "2. Call `commit_and_open_pr` to push them to GitHub — this is REQUIRED, do NOT skip it\n"
-        "3. Call `github_comment` with the PR number to post a summary on GitHub\n\n"
+        "2. Push them and open/update a draft PR with `GH_TOKEN=dummy gh` — this is REQUIRED, do NOT skip it\n"
+        "3. Use `GH_TOKEN=dummy gh pr comment` to post a summary on GitHub\n\n"
         "If no code changes are needed:\n"
-        "1. Call `github_comment` with the PR number to explain your answer — this is REQUIRED, never end silently\n\n"
-        "**You MUST always call `github_comment` before finishing — whether or not changes were made.**"
+        "1. Use `GH_TOKEN=dummy gh pr comment` to explain your answer — this is REQUIRED, never end silently\n\n"
+        "**You MUST always comment on GitHub before finishing — whether or not changes were made.**"
     )
 
 
@@ -424,6 +466,9 @@ async def _fetch_paginated(
     client: httpx.AsyncClient, url: str, headers: dict[str, str]
 ) -> list[dict[str, Any]]:
     """Fetch all pages from a GitHub paginated endpoint.
+
+    Caps at ``PAGINATED_MAX_PAGES`` pages to avoid unbounded fetching on
+    pathological PRs with thousands of comments.
 
     Args:
         client: An active httpx async client.
@@ -436,9 +481,11 @@ async def _fetch_paginated(
     results: list[dict[str, Any]] = []
     params: dict[str, Any] = {"per_page": 100, "page": 1}
 
-    while True:
+    while params["page"] <= PAGINATED_MAX_PAGES:
         try:
             response = await client.get(url, headers=headers, params=params)
+            if response.status_code == 401:
+                raise GitHubAuthError(f"GitHub returned 401 fetching {url}")
             if response.status_code != 200:  # noqa: PLR2004
                 logger.warning("GitHub API returned %s for %s", response.status_code, url)
                 break
@@ -449,6 +496,8 @@ async def _fetch_paginated(
             if len(page_data) < 100:  # noqa: PLR2004
                 break
             params["page"] += 1
+        except GitHubAuthError:
+            raise
         except Exception:
             logger.exception("Failed to fetch %s", url)
             break

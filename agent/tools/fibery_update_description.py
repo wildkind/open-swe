@@ -58,7 +58,10 @@ def fibery_update_description(
         return {"success": False, "error": "Content cannot be empty"}
 
     if field not in _FIELD_MAP:
-        return {"success": False, "error": f"Unknown field: {field}. Use 'description' or 'background_brief'."}
+        return {
+            "success": False,
+            "error": f"Unknown field: {field}. Use 'description' or 'background_brief'.",
+        }
 
     field_info = _FIELD_MAP[field]
 

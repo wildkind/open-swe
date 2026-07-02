@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -14,7 +14,6 @@ from agent.webapp import (
     generate_thread_id_from_fibery_entity,
     parse_repo_field,
 )
-
 
 # ---------------------------------------------------------------------------
 # parse_repo_field
@@ -93,9 +92,7 @@ class TestGenerateThreadId:
 
 
 class TestLeaveFailureCommentFibery:
-    def test_posts_comment_to_fibery_entity(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_posts_comment_to_fibery_entity(self, monkeypatch: pytest.MonkeyPatch) -> None:
         called: dict[str, str] = {}
 
         async def fake_fibery_create_comment(
@@ -128,9 +125,7 @@ class TestLeaveFailureCommentFibery:
             "message": "auth failed",
         }
 
-    def test_no_op_when_fibery_entity_missing(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_op_when_fibery_entity_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should not raise when fibery_entity is missing from config."""
 
         async def fake_fibery_create_comment(
@@ -175,30 +170,29 @@ class TestFiberyUtils:
     def test_create_comment_returns_false_without_credentials(self) -> None:
         from agent.utils import fibery
 
-        with patch.object(fibery, "FIBERY_API_TOKEN", ""), patch.object(
-            fibery, "FIBERY_WORKSPACE_URL", ""
+        with (
+            patch.object(fibery, "FIBERY_API_TOKEN", ""),
+            patch.object(fibery, "FIBERY_WORKSPACE_URL", ""),
         ):
-            result = asyncio.run(
-                fibery.create_comment("App/Task", "entity-id", "Hello")
-            )
+            result = asyncio.run(fibery.create_comment("App/Task", "entity-id", "Hello"))
             assert result is False
 
     def test_update_entity_state_returns_false_without_credentials(self) -> None:
         from agent.utils import fibery
 
-        with patch.object(fibery, "FIBERY_API_TOKEN", ""), patch.object(
-            fibery, "FIBERY_WORKSPACE_URL", ""
+        with (
+            patch.object(fibery, "FIBERY_API_TOKEN", ""),
+            patch.object(fibery, "FIBERY_WORKSPACE_URL", ""),
         ):
-            result = asyncio.run(
-                fibery.update_entity_state("App/Task", "entity-id", "Done")
-            )
+            result = asyncio.run(fibery.update_entity_state("App/Task", "entity-id", "Done"))
             assert result is False
 
     def test_fetch_entity_returns_none_without_credentials(self) -> None:
         from agent.utils import fibery
 
-        with patch.object(fibery, "FIBERY_API_TOKEN", ""), patch.object(
-            fibery, "FIBERY_WORKSPACE_URL", ""
+        with (
+            patch.object(fibery, "FIBERY_API_TOKEN", ""),
+            patch.object(fibery, "FIBERY_WORKSPACE_URL", ""),
         ):
             result = asyncio.run(fibery.fetch_entity("App/Task", "entity-id"))
             assert result is None
@@ -206,8 +200,9 @@ class TestFiberyUtils:
     def test_fetch_user_email_returns_none_without_credentials(self) -> None:
         from agent.utils import fibery
 
-        with patch.object(fibery, "FIBERY_API_TOKEN", ""), patch.object(
-            fibery, "FIBERY_WORKSPACE_URL", ""
+        with (
+            patch.object(fibery, "FIBERY_API_TOKEN", ""),
+            patch.object(fibery, "FIBERY_WORKSPACE_URL", ""),
         ):
             result = asyncio.run(fibery.fetch_user_email("user-id"))
             assert result is None

@@ -635,14 +635,16 @@ async def search_entities(
                 entity_url = ""
                 if FIBERY_WORKSPACE_URL and pid:
                     entity_url = f"{FIBERY_WORKSPACE_URL}/{database_type.replace('/', '-')}/{pid}"
-                entities.append({
-                    "id": row.get("id", ""),
-                    "public_id": pid,
-                    "title": row.get("name", ""),
-                    "state": row.get("state", ""),
-                    "github_tag": row.get("tag", ""),
-                    "url": entity_url,
-                })
+                entities.append(
+                    {
+                        "id": row.get("id", ""),
+                        "public_id": pid,
+                        "title": row.get("name", ""),
+                        "state": row.get("state", ""),
+                        "github_tag": row.get("tag", ""),
+                        "url": entity_url,
+                    }
+                )
             return entities
         except Exception:
             logger.exception("Failed to search Fibery entities for '%s'", query_text)
@@ -750,7 +752,9 @@ async def fetch_entity_document_secret(
                         return secret
             return None
         except Exception:
-            logger.exception("Failed to fetch document secret for entity %s field %s", entity_id, field)
+            logger.exception(
+                "Failed to fetch document secret for entity %s field %s", entity_id, field
+            )
             return None
 
 

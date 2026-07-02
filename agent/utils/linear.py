@@ -10,6 +10,8 @@ import httpx
 
 from agent.utils.langsmith import get_langsmith_trace_url
 
+from .http import DEFAULT_HTTP_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 LINEAR_API_KEY = os.environ.get("LINEAR_API_KEY", "")
@@ -28,7 +30,7 @@ async def _graphql_request(query: str, variables: dict[str, Any] | None = None) 
     if not LINEAR_API_KEY:
         return {"error": "LINEAR_API_KEY is not set"}
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         try:
             response = await http_client.post(
                 LINEAR_API_URL,
@@ -63,13 +65,21 @@ async def comment_on_linear_issue(
     return bool(result.get("commentCreate", {}).get("success"))
 
 
-async def post_linear_trace_comment(issue_id: str, run_id: str, triggering_comment_id: str) -> None:
+async def post_linear_trace_comment(
+    issue_id: str, thread_id: str, triggering_comment_id: str
+) -> None:
     """Post a trace URL comment on a Linear issue."""
-    trace_url = get_langsmith_trace_url(run_id)
+    trace_url = get_langsmith_trace_url(thread_id)
     if trace_url:
         await comment_on_linear_issue(
             issue_id,
             f"On it! [View trace]({trace_url})",
+            parent_id=triggering_comment_id or None,
+        )
+    else:
+        await comment_on_linear_issue(
+            issue_id,
+            "On it!",
             parent_id=triggering_comment_id or None,
         )
 

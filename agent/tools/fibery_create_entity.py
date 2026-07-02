@@ -43,9 +43,7 @@ def fibery_create_entity(title: str, description: str = "") -> dict[str, Any]:
     if not title.strip():
         return {"success": False, "error": "Title cannot be empty"}
 
-    result = asyncio.run(
-        create_task_entity(title, description, parent_entity_id, database_type)
-    )
+    result = asyncio.run(create_task_entity(title, description, parent_entity_id, database_type))
     if result:
         return {"success": True, **result}
     return {"success": False, "error": "Failed to create entity in Fibery"}

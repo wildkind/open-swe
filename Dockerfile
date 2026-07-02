@@ -1,11 +1,19 @@
-FROM python:3.14.0-slim-trixie
+FROM python:3.14.5-slim-trixie
 
 ARG DOCKER_CLI_VERSION=5:29.1.5-1~debian.13~trixie
 ARG NODEJS_VERSION=22.22.0-1nodesource1
 ARG UV_VERSION=0.9.26
 ARG YARN_VERSION=4.12.0
+ARG GH_VERSION=2.83.1
+ARG SFW_VERSION=2.0.6
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Skip sfw's daily background update check at runtime. The check hits
+# api.github.com/repos/SocketDev/sfw-free, which the sandbox proxy authenticates
+# with the GitHub App installation token (no access to that repo), so it fails
+# and the wrapper can't fall back to a binary it never managed to fetch. The
+# initial download still runs at build time below, where egress is unrestricted.
+ENV SFW_SKIP_UPDATE_CHECK=1
 
 RUN apt-get update && apt-get install -y \
     git \
@@ -33,6 +41,18 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "${arch}" in \
+      amd64) gh_arch="amd64" ;; \
+      arm64) gh_arch="arm64" ;; \
+      *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.deb" -o /tmp/gh.deb; \
+    apt-get update; \
+    apt-get install -y /tmp/gh.deb; \
+    rm -rf /tmp/gh.deb /var/lib/apt/lists/*
+
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
       amd64) uv_arch="x86_64-unknown-linux-gnu"; uv_sha256="30ccbf0a66dc8727a02b0e245c583ee970bdafecf3a443c1686e1b30ec4939e8" ;; \
       arm64) uv_arch="aarch64-unknown-linux-gnu"; uv_sha256="f71040c59798f79c44c08a7a1c1af7de95a8d334ea924b47b67ad6b9632be270" ;; \
       *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;; \
@@ -51,7 +71,17 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y "nodejs=${NODEJS_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && corepack enable \
-    && corepack prepare "yarn@${YARN_VERSION}" --activate
+    && corepack prepare "yarn@${YARN_VERSION}" --activate \
+    && npm i -g "sfw@${SFW_VERSION}" \
+    && sfw --version \
+    && test -e "$(npm root -g)/sfw/.sfw-cache/latest"
+
+# Chromium for Stagehand LOCAL browser mode (STAGEHAND_ENV=LOCAL). Skipped at
+# runtime when STAGEHAND_ENV=BROWSERBASE (browser runs on Browserbase cloud).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/*
+ENV STAGEHAND_LOCAL_CHROME_PATH=/usr/bin/chromium
 
 ENV GO_VERSION=1.23.5
 
@@ -68,6 +98,8 @@ RUN echo "=== Installed versions ===" \
     && uv --version \
     && node --version \
     && yarn --version \
+    && sfw --version \
     && go version \
     && docker --version \
-    && git --version
+    && git --version \
+    && gh --version

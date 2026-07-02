@@ -9,6 +9,29 @@ import httpx
 import pytest
 
 from agent.integrations.langsmith import _configure_github_proxy
+from agent.utils.github_app import (
+    BASE_RUNTIME_PROXY_TOKEN_PERMISSIONS,
+    RUNTIME_PROXY_TOKEN_PERMISSIONS,
+)
+
+
+class TestSandboxFactoryLoading:
+    def test_create_sandbox_loads_only_selected_provider(self) -> None:
+        with (
+            patch("agent.utils.sandbox.import_module") as mock_import_module,
+            patch.dict("os.environ", {"SANDBOX_TYPE": "local"}),
+        ):
+            module = MagicMock()
+            module.create_local_sandbox.return_value = MagicMock(id="local")
+            mock_import_module.return_value = module
+
+            from agent.utils.sandbox import create_sandbox
+
+            sandbox = create_sandbox("existing")
+
+        assert sandbox.id == "local"
+        mock_import_module.assert_called_once_with("agent.integrations.local")
+        module.create_local_sandbox.assert_called_once_with("existing")
 
 
 class TestConfigureGithubProxy:
@@ -36,16 +59,24 @@ class TestConfigureGithubProxy:
             call_kwargs = mock_client.patch.call_args
             payload = call_kwargs.kwargs["json"]
 
-            # Verify proxy_config structure
             assert "proxy_config" in payload
             rules = payload["proxy_config"]["rules"]
-            assert len(rules) == 1
+            assert len(rules) == 2
 
-            rule = rules[0]
-            assert rule["name"] == "github"
-            assert rule["match_hosts"] == ["github.com", "*.github.com"]
+            api_rule = rules[0]
+            assert api_rule["name"] == "github-api"
+            assert api_rule["match_hosts"] == ["api.github.com"]
+            api_headers = api_rule["headers"]
+            assert len(api_headers) == 1
+            assert api_headers[0]["name"] == "Authorization"
+            assert api_headers[0]["type"] == "opaque"
+            assert api_headers[0]["value"] == f"Bearer {token}"
 
-            headers = rule["headers"]
+            web_rule = rules[1]
+            assert web_rule["name"] == "github"
+            assert web_rule["match_hosts"] == ["github.com", "*.github.com"]
+
+            headers = web_rule["headers"]
             assert len(headers) == 1
             assert headers[0]["name"] == "Authorization"
             assert headers[0]["type"] == "opaque"
@@ -93,21 +124,60 @@ class TestConfigureGithubProxy:
             headers = mock_client.patch.call_args.kwargs["headers"]
             assert headers == {"X-API-Key": "my-api-key"}
 
-    def test_raises_on_http_error(self) -> None:
-        """Verify HTTP errors propagate."""
+    def test_retries_transient_http_error(self) -> None:
+        """Transient proxy API errors should be retried on the same sandbox."""
+        request = httpx.Request(
+            "PATCH", "https://api.smith.langchain.com/v2/sandboxes/boxes/sandbox-abc"
+        )
+        response = httpx.Response(503, request=request)
+        transient_error = httpx.HTTPStatusError(
+            "Server error",
+            request=request,
+            response=response,
+        )
         with (
             patch("agent.integrations.langsmith.httpx.Client") as mock_client_cls,
+            patch("agent.integrations.langsmith.time.sleep") as mock_sleep,
             patch.dict("os.environ", {"LANGSMITH_API_KEY": "api-key"}),
         ):
             mock_client = MagicMock()
-            mock_client.patch.side_effect = httpx.HTTPStatusError(
-                "Server error", request=MagicMock(), response=MagicMock(status_code=500)
-            )
+            failed_response = MagicMock()
+            failed_response.raise_for_status.side_effect = transient_error
+            successful_response = MagicMock()
+            successful_response.raise_for_status = MagicMock()
+            mock_client.patch.side_effect = [failed_response, successful_response]
+            mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+            mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            _configure_github_proxy("sandbox-abc", "token")
+
+            assert mock_client.patch.call_count == 2
+            mock_sleep.assert_called_once()
+
+    def test_raises_on_non_retryable_http_error(self) -> None:
+        """Non-retryable HTTP errors should propagate without retrying."""
+        request = httpx.Request(
+            "PATCH", "https://api.smith.langchain.com/v2/sandboxes/boxes/sandbox-abc"
+        )
+        response = httpx.Response(400, request=request)
+        error = httpx.HTTPStatusError("Bad request", request=request, response=response)
+        with (
+            patch("agent.integrations.langsmith.httpx.Client") as mock_client_cls,
+            patch("agent.integrations.langsmith.time.sleep") as mock_sleep,
+            patch.dict("os.environ", {"LANGSMITH_API_KEY": "api-key"}),
+        ):
+            mock_client = MagicMock()
+            failed_response = MagicMock()
+            failed_response.raise_for_status.side_effect = error
+            mock_client.patch.return_value = failed_response
             mock_client_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
             mock_client_cls.return_value.__exit__ = MagicMock(return_value=False)
 
             with pytest.raises(httpx.HTTPStatusError):
                 _configure_github_proxy("sandbox-abc", "token")
+
+            mock_client.patch.assert_called_once()
+            mock_sleep.assert_not_called()
 
 
 class TestCreateSandboxWithProxy:
@@ -118,10 +188,10 @@ class TestCreateSandboxWithProxy:
         """Installation token should be used for proxy auth on langsmith sandboxes."""
         with (
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_install",
-            ),
+                return_value=("ghs_install", None),
+            ) as mock_get_token,
             patch("agent.server.create_sandbox") as mock_create,
             patch("agent.server._configure_github_proxy") as mock_proxy,
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith", "LANGSMITH_API_KEY": "ls-key"}),
@@ -132,8 +202,46 @@ class TestCreateSandboxWithProxy:
 
             await _create_sandbox_with_proxy()
 
-            mock_create.assert_called_once_with()
+            mock_create.assert_called_once_with(snapshot_id=None)
             mock_proxy.assert_called_once_with("sandbox-123", "ghs_install")
+            assert (
+                mock_get_token.await_args.kwargs["permissions"] == RUNTIME_PROXY_TOKEN_PERMISSIONS
+            )
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_optional_actions_permission_is_unavailable(self) -> None:
+        """Sandbox creation should still work before an install grants Actions read."""
+        with (
+            patch(
+                "agent.server.get_github_app_installation_token_with_expiry",
+                new_callable=AsyncMock,
+                side_effect=[(None, None), ("ghs_install", "expires")],
+            ) as mock_get_token,
+            patch("agent.server.create_sandbox") as mock_create,
+            patch("agent.server._configure_github_proxy") as mock_proxy,
+            patch("agent.server.record_proxy_token_expiry") as mock_record,
+            patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith", "LANGSMITH_API_KEY": "ls-key"}),
+        ):
+            mock_create.return_value = MagicMock(id="sandbox-123")
+
+            from agent.server import _create_sandbox_with_proxy
+
+            await _create_sandbox_with_proxy(thread_id="thread-123")
+
+            assert mock_get_token.await_args_list[0].kwargs["permissions"] == (
+                RUNTIME_PROXY_TOKEN_PERMISSIONS
+            )
+            assert mock_get_token.await_args_list[0].kwargs["log_errors"] is False
+            assert mock_get_token.await_args_list[1].kwargs["permissions"] == (
+                BASE_RUNTIME_PROXY_TOKEN_PERMISSIONS
+            )
+            mock_proxy.assert_called_once_with("sandbox-123", "ghs_install")
+            mock_record.assert_called_once_with(
+                "thread-123",
+                "expires",
+                repositories=None,
+                permissions=BASE_RUNTIME_PROXY_TOKEN_PERMISSIONS,
+            )
 
     @pytest.mark.asyncio
     async def test_skips_proxy_for_non_langsmith(self) -> None:
@@ -149,7 +257,7 @@ class TestCreateSandboxWithProxy:
 
             await _create_sandbox_with_proxy()
 
-            mock_create.assert_called_once_with()
+            mock_create.assert_called_once_with(snapshot_id=None)
             mock_proxy.assert_not_called()
 
     @pytest.mark.asyncio
@@ -158,9 +266,9 @@ class TestCreateSandboxWithProxy:
         with (
             patch("agent.server.create_sandbox") as mock_create,
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value=None,
+                return_value=(None, None),
             ),
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
         ):
@@ -201,7 +309,7 @@ class TestRefreshProxyOnSandboxReuse:
             patch(
                 "agent.server.resolve_github_token",
                 new_callable=AsyncMock,
-                return_value=("ghp", "enc"),
+                return_value=("ghp", None),
             ),
             patch(
                 "agent.server.get_sandbox_id_from_metadata",
@@ -209,9 +317,9 @@ class TestRefreshProxyOnSandboxReuse:
                 return_value="sandbox-cached",
             ),
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_fresh",
+                return_value=("ghs_fresh", None),
             ),
             patch("agent.server._configure_github_proxy") as mock_proxy,
             patch(
@@ -250,7 +358,7 @@ class TestRefreshProxyOnSandboxReuse:
             patch(
                 "agent.server.resolve_github_token",
                 new_callable=AsyncMock,
-                return_value=("ghp", "enc"),
+                return_value=("ghp", None),
             ),
             patch(
                 "agent.server.get_sandbox_id_from_metadata",
@@ -259,9 +367,9 @@ class TestRefreshProxyOnSandboxReuse:
             ),
             patch("agent.server.create_sandbox", return_value=mock_sandbox) as mock_create,
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_fresh",
+                return_value=("ghs_fresh", None),
             ),
             patch("agent.server._configure_github_proxy") as mock_proxy,
             patch(
@@ -281,3 +389,101 @@ class TestRefreshProxyOnSandboxReuse:
 
             mock_create.assert_called_once_with("sandbox-existing")
             mock_proxy.assert_called_once_with("sandbox-existing", "ghs_fresh")
+
+    @pytest.mark.asyncio
+    async def test_proxy_refresh_failure_recreates_sandbox(self) -> None:
+        """A stale sandbox whose proxy cannot be patched should be replaced."""
+        mock_sandbox = MagicMock(id="sandbox-stale")
+        replacement_sandbox = MagicMock(id="sandbox-replacement")
+        request = httpx.Request(
+            "PATCH", "https://api.smith.langchain.com/v2/sandboxes/boxes/sandbox-stale"
+        )
+        response = httpx.Response(400, request=request)
+
+        with (
+            patch(
+                "agent.server.get_github_app_installation_token_with_expiry",
+                new_callable=AsyncMock,
+                return_value=("ghs_fresh", None),
+            ),
+            patch(
+                "agent.server._configure_github_proxy",
+                side_effect=httpx.HTTPStatusError(
+                    "Bad request",
+                    request=request,
+                    response=response,
+                ),
+            ) as mock_proxy,
+            patch(
+                "agent.server._recreate_sandbox",
+                new_callable=AsyncMock,
+                return_value=replacement_sandbox,
+            ) as mock_recreate,
+            patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
+        ):
+            from agent.server import _refresh_github_proxy_or_recreate
+
+            sandbox = await _refresh_github_proxy_or_recreate(mock_sandbox, "thread-123")
+
+            assert sandbox is replacement_sandbox
+            mock_proxy.assert_called_once_with("sandbox-stale", "ghs_fresh")
+            mock_recreate.assert_awaited_once_with(
+                "thread-123",
+                github_proxy_token=None,
+                github_proxy_repositories=None,
+                repo=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_starts_stopped_langsmith_sandbox_before_proxy_refresh(self) -> None:
+        """Proxy config requires a running LangSmith sandbox."""
+        inner_sandbox = MagicMock(name="sandbox-stopped")
+        inner_sandbox.name = "sandbox-stopped"
+        inner_sandbox._client.get_sandbox_status.return_value = MagicMock(status="stopped")
+
+        with (
+            patch(
+                "agent.server.get_github_app_installation_token_with_expiry",
+                new_callable=AsyncMock,
+                return_value=("ghs_fresh", None),
+            ),
+            patch("agent.server._configure_github_proxy") as mock_proxy,
+            patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
+        ):
+            from agent.server import LangSmithSandbox, _refresh_github_proxy
+
+            sandbox_backend = object.__new__(LangSmithSandbox)
+            sandbox_backend._sandbox = inner_sandbox
+
+            await _refresh_github_proxy(sandbox_backend)
+
+            inner_sandbox._client.get_sandbox_status.assert_called_once_with("sandbox-stopped")
+            inner_sandbox.start.assert_called_once_with()
+            mock_proxy.assert_called_once_with("sandbox-stopped", "ghs_fresh")
+
+    @pytest.mark.asyncio
+    async def test_skips_start_for_ready_langsmith_sandbox_before_proxy_refresh(self) -> None:
+        """Ready sandboxes can be patched without starting again."""
+        inner_sandbox = MagicMock(name="sandbox-ready")
+        inner_sandbox.name = "sandbox-ready"
+        inner_sandbox._client.get_sandbox_status.return_value = MagicMock(status="ready")
+
+        with (
+            patch(
+                "agent.server.get_github_app_installation_token_with_expiry",
+                new_callable=AsyncMock,
+                return_value=("ghs_fresh", None),
+            ),
+            patch("agent.server._configure_github_proxy") as mock_proxy,
+            patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
+        ):
+            from agent.server import LangSmithSandbox, _refresh_github_proxy
+
+            sandbox_backend = object.__new__(LangSmithSandbox)
+            sandbox_backend._sandbox = inner_sandbox
+
+            await _refresh_github_proxy(sandbox_backend)
+
+            inner_sandbox._client.get_sandbox_status.assert_called_once_with("sandbox-ready")
+            inner_sandbox.start.assert_not_called()
+            mock_proxy.assert_called_once_with("sandbox-ready", "ghs_fresh")

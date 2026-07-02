@@ -13,17 +13,31 @@ from langgraph.config import get_config
 from langgraph.graph.state import RunnableConfig
 from langgraph_sdk import get_client
 
-from ..encryption import encrypt_token
-from .github_app import get_github_app_installation_token
-from .github_token import get_github_token_from_thread
-from .github_user_email_map import GITHUB_USER_EMAIL_MAP
 from .fibery import create_comment as fibery_create_comment
+from .github_app import get_github_app_installation_token_with_expiry
+from .github_token import cache_github_token_for_thread, get_github_token_from_thread
+from .http import DEFAULT_HTTP_TIMEOUT
 from .linear import comment_on_linear_issue
-from .slack import post_slack_ephemeral_message, post_slack_thread_reply
+from .slack import post_slack_thread_reply
 
 logger = logging.getLogger(__name__)
 
 client = get_client()
+
+
+class GitHubUserAuthRequired(RuntimeError):
+    """Raised when a mapped user has no valid GitHub OAuth token.
+
+    Signals that the run cannot proceed on the user's behalf and that the user
+    must (re-)authenticate. The Slack webhook blocks before creating a run, so
+    this is a defense-in-depth signal at execution time.
+    """
+
+    def __init__(self, source: str, github_login: str | None) -> None:
+        self.source = source
+        self.github_login = github_login
+        super().__init__(f"GitHub authentication required for {source} user '{github_login}'")
+
 
 LANGSMITH_API_KEY = os.environ.get("LANGSMITH_API_KEY_PROD", "")
 LANGSMITH_API_URL = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
@@ -106,7 +120,7 @@ async def get_ls_user_id_from_email(email: str) -> dict[str, str | None]:
 
     url = f"{LANGSMITH_API_URL}/api/v1/workspaces/current/members/active"
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
         try:
             response = await client.get(
                 url,
@@ -125,6 +139,19 @@ async def get_ls_user_id_from_email(email: str) -> dict[str, str | None]:
         except Exception as e:
             logger.exception("Error getting LangSmith user info for email: %s", e)
         return {"ls_user_id": None, "tenant_id": None}
+
+
+def _extract_expires_at(response_data: dict[str, Any]) -> str | None:
+    """Pull an expiry from a LangSmith auth response in any of its known shapes."""
+    expires_at = response_data.get("expires_at") or response_data.get("expiresAt")
+    if isinstance(expires_at, str) and expires_at:
+        return expires_at
+    if isinstance(expires_at, int | float):
+        return datetime.fromtimestamp(float(expires_at), tz=UTC).isoformat()
+    expires_in = response_data.get("expires_in") or response_data.get("expiresIn")
+    if isinstance(expires_in, int | float) and expires_in > 0:
+        return (datetime.now(UTC) + timedelta(seconds=int(expires_in))).isoformat()
+    return None
 
 
 async def get_github_token_for_user(ls_user_id: str, tenant_id: str) -> dict[str, Any]:
@@ -151,7 +178,7 @@ async def get_github_token_for_user(ls_user_id: str, tenant_id: str) -> dict[str
             "ls_user_id": ls_user_id,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
             response = await client.post(
                 f"{LANGSMITH_HOST_API_URL}/v2/auth/authenticate",
                 json=payload,
@@ -164,7 +191,11 @@ async def get_github_token_for_user(ls_user_id: str, tenant_id: str) -> dict[str
             auth_url = response_data.get("url")
 
             if token:
-                return {"token": token}
+                result: dict[str, Any] = {"token": token}
+                expires_at = _extract_expires_at(response_data)
+                if expires_at:
+                    result["expires_at"] = expires_at
+                return result
             if auth_url:
                 return {"auth_url": auth_url}
             return {"error": f"Unexpected auth result: {response_data}"}
@@ -228,44 +259,37 @@ async def leave_failure_comment(
         slack_thread = configurable.get("slack_thread", {})
         channel_id = slack_thread.get("channel_id") if isinstance(slack_thread, dict) else None
         thread_ts = slack_thread.get("thread_ts") if isinstance(slack_thread, dict) else None
-        triggering_user_id = (
-            slack_thread.get("triggering_user_id") if isinstance(slack_thread, dict) else None
-        )
         if channel_id and thread_ts:
-            if isinstance(triggering_user_id, str) and triggering_user_id:
-                logger.info(
-                    "Posting auth failure ephemeral reply to Slack user %s in channel %s thread %s",
-                    triggering_user_id,
-                    channel_id,
-                    thread_ts,
-                )
-                sent = await post_slack_ephemeral_message(
-                    channel_id=channel_id,
-                    user_id=triggering_user_id,
-                    text=message,
-                    thread_ts=thread_ts,
-                )
-                if sent:
-                    return
-                logger.warning(
-                    "Failed to post ephemeral auth failure reply for Slack user %s; falling back to thread reply",
-                    triggering_user_id,
-                )
-            else:
-                logger.warning(
-                    "Missing Slack triggering_user_id for auth failure reply; falling back to thread reply",
-                )
+            # The auth-failure ``message`` can carry a per-user GitHub auth URL,
+            # which must not be posted in a shared thread (anyone could complete
+            # it and bind the wrong account). Post a generic, token-free notice and
+            # let the user finish sign-in from their own authenticated dashboard.
+            from ..dashboard.oauth import build_settings_url
+
+            settings_url = build_settings_url()
+            link = (
+                f"<{settings_url}|your Open SWE settings>"
+                if settings_url
+                else "your Open SWE settings"
+            )
             logger.info(
-                "Posting auth failure reply to Slack channel %s thread %s",
+                "Posting generic auth-failure notice to Slack channel %s thread %s",
                 channel_id,
                 thread_ts,
             )
-            await post_slack_thread_reply(channel_id, thread_ts, message)
+            await post_slack_thread_reply(
+                channel_id,
+                thread_ts,
+                "⚠️ I couldn't resolve your GitHub account for this run. Sign in with GitHub and "
+                f"connect your Slack account in {link}, then tag me again.",
+            )
         return
     if source == "fibery":
         fibery_entity = configurable.get("fibery_entity", {})
         fe_entity_id = fibery_entity.get("id") if isinstance(fibery_entity, dict) else None
-        fe_database_type = fibery_entity.get("database_type") if isinstance(fibery_entity, dict) else None
+        fe_database_type = (
+            fibery_entity.get("database_type") if isinstance(fibery_entity, dict) else None
+        )
         if fe_entity_id and fe_database_type:
             logger.info(
                 "Posting auth failure comment to Fibery entity %s (source=%s)",
@@ -274,7 +298,7 @@ async def leave_failure_comment(
             )
             await fibery_create_comment(fe_database_type, fe_entity_id, message)
         return
-    if source == "github":
+    if source in ("github", "github_push"):
         logger.warning(
             "Auth failure for GitHub-triggered run (no token to post comment): %s", message
         )
@@ -282,21 +306,18 @@ async def leave_failure_comment(
     raise ValueError(f"Unknown source: {source}")
 
 
-async def persist_encrypted_github_token(thread_id: str, token: str) -> str:
-    """Encrypt a GitHub token and store it on the thread metadata."""
-    encrypted = encrypt_token(token)
-    await client.threads.update(
-        thread_id=thread_id,
-        metadata={"github_token_encrypted": encrypted},
-    )
-    return encrypted
+def _cache_resolved_github_token(
+    thread_id: str, token: str, expires_at: str | None = None
+) -> tuple[str, str | None]:
+    cache_github_token_for_thread(thread_id, token, expires_at=expires_at)
+    return token, expires_at
 
 
-async def save_encrypted_token_from_email(
+async def resolve_token_from_email(
     email: str | None,
     source: str,
-) -> tuple[str, str]:
-    """Resolve, encrypt, and store a GitHub token based on user email."""
+) -> tuple[str, str | None]:
+    """Resolve and cache a GitHub token based on user email."""
     config = get_config()
     configurable = config.get("configurable", {})
     thread_id = configurable.get("thread_id")
@@ -354,13 +375,36 @@ async def save_encrypted_token_from_email(
         await leave_failure_comment(source, message)
         raise ValueError(f"No token found: {error}")
 
-    encrypted = await persist_encrypted_github_token(thread_id, token)
-    return token, encrypted
+    expires_at = auth_result.get("expires_at") if isinstance(auth_result, dict) else None
+    return _cache_resolved_github_token(
+        thread_id, token, expires_at=expires_at if isinstance(expires_at, str) else None
+    )
 
 
-async def _resolve_bot_installation_token(thread_id: str) -> tuple[str, str]:
-    """Get a GitHub App installation token and persist it for the thread."""
-    bot_token = await get_github_app_installation_token()
+async def _resolve_dashboard_user_token(
+    thread_id: str, github_login: str
+) -> tuple[str, str | None] | None:
+    """Resolve a per-user GitHub token from the dashboard OAuth store."""
+    login = github_login.strip()
+    if not login:
+        raise ValueError("missing github_login")
+
+    from ..dashboard.profiles import OAUTH_TOKENS_NAMESPACE, get_valid_access_token
+    from ..dashboard.profiles import _get_value as get_oauth_record
+
+    token = await get_valid_access_token(login)
+    if not token:
+        return None
+    record = await get_oauth_record(OAUTH_TOKENS_NAMESPACE, login)
+    expires_at = record.get("token_expires_at") if isinstance(record, dict) else None
+    return _cache_resolved_github_token(
+        thread_id, token, expires_at=expires_at if isinstance(expires_at, str) else None
+    )
+
+
+async def _resolve_bot_installation_token(thread_id: str) -> tuple[str, str | None]:
+    """Get a GitHub App installation token and cache it for the thread."""
+    bot_token, expires_at = await get_github_app_installation_token_with_expiry()
     if not bot_token:
         raise RuntimeError(
             "Bot-token-only mode is active (LANGSMITH_API_KEY_PROD set without "
@@ -370,11 +414,10 @@ async def _resolve_bot_installation_token(thread_id: str) -> tuple[str, str]:
     logger.info(
         "Using GitHub App installation token for thread %s (bot-token-only mode)", thread_id
     )
-    encrypted = await persist_encrypted_github_token(thread_id, bot_token)
-    return bot_token, encrypted
+    return _cache_resolved_github_token(thread_id, bot_token, expires_at=expires_at)
 
 
-async def resolve_github_token(config: RunnableConfig, thread_id: str) -> tuple[str, str]:
+async def resolve_github_token(config: RunnableConfig, thread_id: str) -> tuple[str, str | None]:
     """Resolve a GitHub token from the run config based on the source.
 
     Routes to the correct auth method depending on whether the run was
@@ -384,32 +427,53 @@ async def resolve_github_token(config: RunnableConfig, thread_id: str) -> tuple[
     X_SERVICE_AUTH_JWT_SECRET), the GitHub App installation token is used
     for all operations instead of per-user OAuth tokens.
 
-    Returns:
-        (github_token, new_encrypted) tuple.
-
     Raises:
         RuntimeError: If source is missing or token resolution fails.
     """
-    if is_bot_token_only_mode():
-        return await _resolve_bot_installation_token(thread_id)
-
     configurable = config["configurable"]
     source = configurable.get("source")
     if not source:
         logger.error("Missing source for thread %s; cannot route auth failure responses", thread_id)
         raise RuntimeError(f"GitHub auth failed for thread {thread_id}: missing source")
 
+    github_login = configurable.get("github_login")
+
+    # Per-user OAuth from the dashboard store wins even in bot-token-only mode,
+    # for sources that carry a mapped GitHub login (Slack, dashboard). This is
+    # what lets the agent open PRs as the triggering user.
+    if (
+        source in ("slack", "dashboard", "schedule")
+        and isinstance(github_login, str)
+        and github_login.strip()
+    ):
+        try:
+            user_token = await _resolve_dashboard_user_token(thread_id, github_login)
+        except ValueError as exc:
+            logger.error("GitHub auth failed for thread %s: %s", thread_id, str(exc))
+            raise RuntimeError(str(exc)) from exc
+        if user_token is not None:
+            return user_token
+        # No valid user token. In bot-token-only mode fall back to the bot so the
+        # deployment stays functional; otherwise block and require auth.
+        if is_bot_token_only_mode():
+            return await _resolve_bot_installation_token(thread_id)
+        raise GitHubUserAuthRequired(source, github_login)
+
+    if is_bot_token_only_mode():
+        return await _resolve_bot_installation_token(thread_id)
+
     try:
         if source == "github":
-            cached_token, cached_encrypted = await get_github_token_from_thread(thread_id)
-            if cached_token and cached_encrypted:
-                return cached_token, cached_encrypted
-            github_login = configurable.get("github_login")
-            email = GITHUB_USER_EMAIL_MAP.get(github_login or "")
+            cached_token, cached_expires_at = await get_github_token_from_thread(thread_id)
+            if cached_token:
+                return cached_token, cached_expires_at
+            from ..dashboard.user_mappings import email_for_login
+
+            email = await email_for_login(github_login)
             if not email:
                 raise ValueError(f"No email mapping found for GitHub user '{github_login}'")
-            return await save_encrypted_token_from_email(email, source)
-        return await save_encrypted_token_from_email(configurable.get("user_email"), source)
+            return await resolve_token_from_email(email, source)
+        return await resolve_token_from_email(configurable.get("user_email"), source)
     except ValueError as exc:
         logger.error("GitHub auth failed for thread %s: %s", thread_id, str(exc))
         raise RuntimeError(str(exc)) from exc

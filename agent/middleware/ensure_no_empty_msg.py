@@ -3,7 +3,12 @@ from uuid import uuid4
 
 from langchain.agents.middleware import AgentState, after_model
 from langchain_core.messages import AnyMessage, ToolMessage
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
+
+from .check_message_queue import DASHBOARD_HANDOFF_MARKER
+
+_DASHBOARD_SOURCE = "dashboard"
 
 
 def get_every_message_since_last_human(state: AgentState) -> list[AnyMessage]:
@@ -16,19 +21,11 @@ def get_every_message_since_last_human(state: AgentState) -> list[AnyMessage]:
     return messages[last_human_idx + 1 :]
 
 
-def check_if_model_already_called_commit_and_open_pr(messages: list[AnyMessage]) -> bool:
-    for msg in messages:
-        if msg.type == "tool" and msg.name == "commit_and_open_pr":
-            return True
-    return False
-
-
 def check_if_model_messaged_user(messages: list[AnyMessage]) -> bool:
     for msg in messages:
         if msg.type == "tool" and msg.name in [
             "slack_thread_reply",
             "linear_comment",
-            "github_comment",
         ]:
             return True
     return False
@@ -48,19 +45,46 @@ def check_if_no_op(messages: list[AnyMessage]) -> bool:
     return False
 
 
+def _content_contains_text(content: object, text: str) -> bool:
+    if isinstance(content, str):
+        return text in content
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, dict) and text in str(block.get("text", "")):
+            return True
+    return False
+
+
+def _last_human_is_dashboard_handoff(state: AgentState) -> bool:
+    for msg in reversed(state["messages"]):
+        if msg.type == "human":
+            return _content_contains_text(msg.content, DASHBOARD_HANDOFF_MARKER)
+    return False
+
+
+def _is_dashboard_source() -> bool:
+    try:
+        config = get_config()
+    except RuntimeError:
+        return False
+    configurable = config.get("configurable", {})
+    if not isinstance(configurable, dict):
+        return False
+    return configurable.get("source") == _DASHBOARD_SOURCE
+
+
 @after_model
 def ensure_no_empty_msg(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
     last_msg = state["messages"][-1]
-    has_contents = bool(last_msg.text())
+    has_contents = bool(last_msg.text)
     has_tool_calls = bool(last_msg.tool_calls)
     if not has_tool_calls and not has_contents:
         messages_since_last_human = get_every_message_since_last_human(state)
         if check_if_no_op(messages_since_last_human):
             return None
 
-        if check_if_model_already_called_commit_and_open_pr(
-            messages_since_last_human
-        ) and check_if_model_messaged_user(messages_since_last_human):
+        if check_if_model_messaged_user(messages_since_last_human):
             return None
 
         tc_id = str(uuid4())
@@ -75,15 +99,13 @@ def ensure_no_empty_msg(state: AgentState, runtime: Runtime) -> dict[str, Any] |
         return {"messages": [last_msg, no_op_tool_msg]}
 
     if has_contents and not has_tool_calls:
-        # See if the model already called open_pr or it sent a slack/linear message
-        # First, get every message since the last human message
         messages_since_last_human = get_every_message_since_last_human(state)
 
-        # If it opened a PR, we don't need to do anything
         if (
-            check_if_model_already_called_commit_and_open_pr(messages_since_last_human)
-            or check_if_model_messaged_user(messages_since_last_human)
+            check_if_model_messaged_user(messages_since_last_human)
             or check_if_confirming_completion(messages_since_last_human)
+            or _is_dashboard_source()
+            or _last_human_is_dashboard_handoff(state)
         ):
             return None
 

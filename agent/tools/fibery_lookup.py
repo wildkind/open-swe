@@ -32,9 +32,7 @@ def fibery_lookup(query: str) -> dict[str, Any]:
     match = re.search(r"(?:TASK-)?(\d+)", query.strip().strip("[]"), re.IGNORECASE)
     if match:
         public_id = match.group(1)
-        result = asyncio.run(
-            lookup_entity_by_public_id(_DEFAULT_DATABASE_TYPE, public_id)
-        )
+        result = asyncio.run(lookup_entity_by_public_id(_DEFAULT_DATABASE_TYPE, public_id))
         if result:
             return {"success": True, "entity": result}
         return {"success": False, "error": f"No entity found with public ID {public_id}"}

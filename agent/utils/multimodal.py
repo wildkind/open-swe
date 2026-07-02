@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 import httpx
 from langchain_core.messages.content import create_image_block
 
+from .url_safety import is_url_safe
+
 logger = logging.getLogger(__name__)
 
 IMAGE_MARKDOWN_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)")
@@ -37,12 +39,25 @@ def extract_image_urls(text: str) -> list[str]:
     return deduped
 
 
+def vision_not_supported_warning(model_id: str, image_count: int) -> str:
+    """Build a prompt-visible warning when images are sent to a text-only model."""
+    return (
+        f"\n\n**Note:** {image_count} image(s) were attached but the current model "
+        f"({model_id}) does not support image input. The images were not included. "
+        "Please switch to a vision-enabled model to process images."
+    )
+
+
 async def fetch_image_block(
     image_url: str,
     client: httpx.AsyncClient,
 ) -> dict[str, Any] | None:
     """Fetch image bytes and build an image content block."""
     try:
+        safe, reason = is_url_safe(image_url)
+        if not safe:
+            logger.warning("Refusing to fetch image (SSRF guard) %s: %s", image_url, reason)
+            return None
         logger.debug("Fetching image from %s", image_url)
         headers = None
         host = (urlparse(image_url).hostname or "").lower()

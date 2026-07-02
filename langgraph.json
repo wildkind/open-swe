@@ -1,12 +1,26 @@
 {
   "$schema": "https://langgra.ph/schema.json",
   "python_version": "3.12",
+  "api_version": "0.10.0rc3",
   "graphs": {
-    "agent": "agent.server:get_agent"
+    "agent": "agent.server:traced_agent",
+    "reviewer": "agent.reviewer:traced_reviewer_agent",
+    "analyzer": "agent.analyzer:traced_analyzer",
+    "chat": "agent.chat:traced_chat_agent",
+    "scheduler": "agent.scheduler:get_scheduler"
   },
-  "dependencies": ["."],
+  "dependencies": [
+    "."
+  ],
   "http": {
     "app": "agent.webapp:app"
   },
-  "env": ".env" 
+  "checkpointer": {
+    "ttl": {
+      "strategy": "delete",
+      "sweep_interval_minutes": 60,
+      "default_ttl": 43200
+    }
+  },
+  "env": ".env"
 }

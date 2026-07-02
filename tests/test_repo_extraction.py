@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent.utils.repo import extract_repo_from_text
+from agent.utils.slack import extract_channel_description_text
 
 
 class TestExtractRepoFromText:
@@ -77,6 +78,33 @@ class TestExtractRepoFromText:
         assert result == {"owner": "real-org", "name": "real-repo"}
 
 
+class TestExtractChannelDescriptionText:
+    def test_combines_topic_and_purpose(self) -> None:
+        channel = {
+            "topic": {"value": "repo:my-org/my-repo"},
+            "purpose": {"value": "Team channel"},
+        }
+        assert extract_channel_description_text(channel) == "repo:my-org/my-repo\nTeam channel"
+
+    def test_handles_missing_sections(self) -> None:
+        assert extract_channel_description_text({"topic": {"value": "hi"}}) == "hi"
+
+    def test_empty_for_none(self) -> None:
+        assert extract_channel_description_text(None) == ""
+
+    def test_empty_for_blank_values(self) -> None:
+        channel = {"topic": {"value": "  "}, "purpose": {"value": ""}}
+        assert extract_channel_description_text(channel) == ""
+
+    def test_repo_token_extractable_from_description(self) -> None:
+        channel = {"topic": {"value": "Use repo:langchain-ai/open-swe here"}, "purpose": {}}
+        description = extract_channel_description_text(channel)
+        assert extract_repo_from_text(description) == {
+            "owner": "langchain-ai",
+            "name": "open-swe",
+        }
+
+
 class TestLinearWebhookRepoOverride:
     """Test that the Linear webhook handler checks comment body for repo config first."""
 
@@ -115,7 +143,7 @@ class TestLinearWebhookRepoOverride:
                     "comments": {"nodes": []},
                 },
             ),
-            patch("agent.webapp._is_repo_org_allowed", return_value=True),
+            patch("agent.webapp._is_repo_allowed", return_value=True),
             patch("agent.webapp.BackgroundTasks"),
         ):
             mock_request = AsyncMock()
@@ -165,7 +193,7 @@ class TestLinearWebhookRepoOverride:
                     "comments": {"nodes": []},
                 },
             ),
-            patch("agent.webapp._is_repo_org_allowed", return_value=True),
+            patch("agent.webapp._is_repo_allowed", return_value=True),
         ):
             mock_request = AsyncMock()
             mock_request.body.return_value = json.dumps(payload).encode()

@@ -57,9 +57,13 @@ def changie_new(
         repo_dir = resolve_repo_dir(sandbox_backend, repo_name)
 
         cmd_parts = [
-            "npx", "changie", "new",
-            "--kind", shlex.quote(kind),
-            "--body", shlex.quote(body),
+            "npx",
+            "changie",
+            "new",
+            "--kind",
+            shlex.quote(kind),
+            "--body",
+            shlex.quote(body),
         ]
 
         if component:

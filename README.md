@@ -41,9 +41,9 @@ Rather than forking an existing agent or building from scratch, Open SWE **compo
 
 ```python
 create_deep_agent(
-    model="anthropic:claude-opus-4-6",
+    model="openai:gpt-5.5",
     system_prompt=construct_system_prompt(...),
-    tools=[http_request, fetch_url, list_repos, get_branch_name, commit_and_open_pr, linear_comment, slack_thread_reply],
+    tools=[http_request, fetch_url, linear_comment, slack_thread_reply],
     backend=sandbox_backend,
     middleware=[ToolErrorMiddleware(), check_message_queue_before_model, ...],
 )
@@ -70,11 +70,15 @@ Stripe's key insight: *tool curation matters more than tool quantity.* Open SWE 
 | `execute` | Shell commands in the sandbox |
 | `fetch_url` | Fetch web pages as markdown |
 | `http_request` | API calls (GET, POST, etc.) |
-| `commit_and_open_pr` | Git commit + open a GitHub draft PR |
 | `linear_comment` | Post updates to Linear tickets |
+| `slack_add_reaction` | React to Slack messages |
 | `slack_thread_reply` | Reply in Slack threads |
 
-Plus the built-in Deep Agents tools: `read_file`, `write_file`, `edit_file`, `ls`, `glob`, `grep`, `write_todos`, and `task` (subagent spawning).
+GitHub operations are performed with `GH_TOKEN=dummy gh` inside the sandbox, backed by the LangSmith proxy. Plus the built-in Deep Agents tools: `read_file`, `write_file`, `edit_file`, `ls`, `glob`, `grep`, `write_todos`, and `task` (subagent spawning).
+
+**Optional observability tools (server-side):** Admins can connect Datadog and LangSmith from team settings (Admin → Observability credentials). When connected, the agent gains Datadog tools (via Datadog's hosted MCP server, default `toolsets=core`) and read-only LangSmith tools (`langsmith_get_trace`, `langsmith_list_runs`). These run in the LangGraph server process using credentials encrypted at rest — the sandbox never holds Datadog or LangSmith keys. They are loaded **only for runs triggered by an authorized user** (admins, plus any emails in `OBSERVABILITY_AUTHORIZED_EMAILS`), so a prompt-injected run from an untrusted contributor cannot reach team observability data. Use scoped, read-oriented keys regardless: observability data (logs, traces) is attacker-influenced content that can carry prompt injection, and the agent has network egress — the same residual-risk class as `web_search` / `fetch_url`.
+
+**Optional Corridor guardrails (server-side MCP):** Set `CORRIDOR_API_TOKEN` (or `CORRIDOR_MCP_TOKEN` / `CORRIDOR_TOKEN`) to load Corridor's hosted MCP server for each agent run. Open SWE exposes only Corridor's `analyzePlan` tool. `CORRIDOR_MCP_URL` defaults to `https://app.corridor.dev/api/mcp`; if set explicitly, Open SWE only accepts the same HTTPS host and `/api/mcp` path. Tokens are sent via `Authorization: Bearer ...` from the LangGraph server process and are never placed in the sandbox. A legacy `?token=...` URL is accepted and normalized into the header form.
 
 ### 4. Context Engineering — AGENTS.md + Source Context
 
@@ -92,7 +96,7 @@ Open SWE's orchestration has two layers:
 **Middleware:** Deterministic middleware hooks run around the agent loop:
 
 - **`check_message_queue_before_model`** — Injects follow-up messages (Linear comments or Slack messages that arrive mid-run) before the next model call. You can message the agent while it's working and it'll pick up your input at its next step.
-- **`open_pr_if_needed`** — After-agent safety net that commits and opens a PR if the agent didn't do it itself. This is a lightweight version of Stripe's deterministic nodes — ensuring critical steps happen regardless of LLM behavior.
+- **`notify_step_limit_reached`** — After-agent hook that posts a Slack reply when the agent hits the model-call limit, so users get a clear signal instead of silence.
 - **`ToolErrorMiddleware`** — Catches and handles tool errors gracefully.
 
 ### 6. Invocation — Slack, Linear, and GitHub
@@ -105,10 +109,9 @@ All three companies in the article converge on **Slack as the primary invocation
 
 Each invocation creates a deterministic thread ID, so follow-up messages on the same issue or thread route to the same running agent.
 
-### 7. Validation — Prompt-Driven + Safety Nets
+### 7. Validation — Prompt-Driven
 
-The agent is instructed to run linters, formatters, and tests before committing. The `open_pr_if_needed` middleware acts as a backstop — if the agent finishes without opening a PR, the middleware handles it automatically.
-
+The agent is instructed to run linters, formatters, and tests before committing, and is responsible end-to-end for committing, pushing, opening/updating the draft PR, and replying in the source channel.
 This is an area where you can extend Open SWE for your org: add deterministic CI checks, visual verification, or review gates as additional middleware. See the [Customization Guide](CUSTOMIZATION.md#6-middleware) for how.
 
 ---
@@ -123,7 +126,7 @@ This is an area where you can extend Open SWE for your org: add deterministic CI
 | **Context** | AGENTS.md + issue/thread | Rule files + pre-hydration | OpenCode built-in | Linear-first + MCPs |
 | **Orchestration** | Subagents + middleware | Blueprints (deterministic + agentic) | Sessions + child sessions | Three modes |
 | **Invocation** | Slack, Linear, GitHub | Slack + embedded buttons | Slack + web + Chrome extension | Slack-native |
-| **Validation** | Prompt-driven + PR safety net | 3-layer (local + CI + 1 retry) | Visual DOM verification | Agent councils + auto-merge |
+| **Validation** | Prompt-driven | 3-layer (local + CI + 1 retry) | Visual DOM verification | Agent councils + auto-merge |
 
 ---
 
@@ -136,12 +139,13 @@ This is an area where you can extend Open SWE for your org: add deterministic CI
 - **GitHub OAuth built-in** — authenticates with your GitHub account automatically
 - **Opens PRs automatically** — commits changes and opens a draft PR when done, linked back to your ticket
 - **Subagent support** — the agent can spawn child agents for parallel subtasks
+- **Web dashboard** — a companion app (in `ui/`) for GitHub login, per-user model/profile settings, team defaults, enabled-repo and review-style management, user mappings, and an Agents chat UI
 
 ---
 
 ## Getting Started
 
-- **[Installation Guide](INSTALLATION.md)** — GitHub App creation, LangSmith, Linear/Slack/GitHub triggers, and production deployment
+- **[Installation Guide](INSTALLATION.md)** — local dev (backend + dashboard), GitHub App creation, LangSmith, Linear/Slack/GitHub triggers, and production deployment
 - **[Customization Guide](CUSTOMIZATION.md)** — swap the sandbox, model, tools, triggers, system prompt, and middleware for your org
 
 ## License
