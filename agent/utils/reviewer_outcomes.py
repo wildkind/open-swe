@@ -64,14 +64,21 @@ def _outcomes_client() -> LangSmithClient | None:
     """Build a single LangSmith client, preferring the prod tenant."""
     prod_key = os.environ.get("LANGSMITH_API_KEY_PROD")
     if prod_key:
-        api_url = os.environ.get("LANGSMITH_ENDPOINT_PROD") or os.environ.get(
-            "LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"
+        api_url = (
+            os.environ.get("LANGSMITH_ENDPOINT_PROD")
+            or os.environ.get("LANGSMITH_ENDPOINT")
+            or os.environ.get("LANGCHAIN_ENDPOINT")
+            or "https://api.smith.langchain.com"
         )
         return LangSmithClient(api_key=prod_key, api_url=api_url)
     api_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get("LANGCHAIN_API_KEY")
     if not api_key:
         return None
-    api_url = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+    api_url = (
+        os.environ.get("LANGSMITH_ENDPOINT")
+        or os.environ.get("LANGCHAIN_ENDPOINT")
+        or "https://api.smith.langchain.com"
+    )
     return LangSmithClient(api_key=api_key, api_url=api_url)
 
 

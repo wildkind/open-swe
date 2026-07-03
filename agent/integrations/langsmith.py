@@ -149,7 +149,15 @@ def _configure_github_proxy(sandbox_name: str, github_token: str) -> None:
     if not api_key:
         logger.warning("No LangSmith API key found, skipping GitHub proxy configuration")
         return
-    langsmith_endpoint = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+    # Fall back to LANGCHAIN_ENDPOINT like the langsmith SDK does: the hosted
+    # platform reserves LANGSMITH_ENDPOINT and injects only LANGCHAIN_ENDPOINT,
+    # so reading LANGSMITH_ENDPOINT alone sends this PATCH to the US endpoint on
+    # EU deployments while the SDK creates the sandbox on EU (-> 403).
+    langsmith_endpoint = (
+        os.environ.get("LANGSMITH_ENDPOINT")
+        or os.environ.get("LANGCHAIN_ENDPOINT")
+        or "https://api.smith.langchain.com"
+    )
     url = f"{langsmith_endpoint}/v2/sandboxes/boxes/{sandbox_name}"
     payload = {"proxy_config": {"rules": _github_proxy_rules(github_token)}}
     with httpx.Client(timeout=PROXY_CONFIG_TIMEOUT_SECONDS) as client:

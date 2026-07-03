@@ -40,7 +40,11 @@ class GitHubUserAuthRequired(RuntimeError):
 
 
 LANGSMITH_API_KEY = os.environ.get("LANGSMITH_API_KEY_PROD", "")
-LANGSMITH_API_URL = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+LANGSMITH_API_URL = (
+    os.environ.get("LANGSMITH_ENDPOINT")
+    or os.environ.get("LANGCHAIN_ENDPOINT")
+    or "https://api.smith.langchain.com"
+)
 LANGSMITH_HOST_API_URL = os.environ.get("LANGSMITH_HOST_API_URL", "https://api.host.langchain.com")
 GITHUB_OAUTH_PROVIDER_ID = os.environ.get("GITHUB_OAUTH_PROVIDER_ID", "")
 X_SERVICE_AUTH_JWT_SECRET = os.environ.get("X_SERVICE_AUTH_JWT_SECRET", "")
